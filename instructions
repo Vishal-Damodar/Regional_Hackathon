@@ -1,0 +1,8 @@
+backend:
+cd backend
+uvicorn main:app --reload --port 8000
+
+
+streamlit:
+cd streamlit
+streamlit run app.py
