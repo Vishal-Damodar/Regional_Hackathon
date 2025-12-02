@@ -21,3 +21,6 @@ uvicorn
 requests
 httpx
 langchain-openai
+
+
+yfinance
