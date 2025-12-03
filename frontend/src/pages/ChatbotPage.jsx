@@ -5,6 +5,9 @@ import { PlaceholdersAndVanishInput } from "../components/ui/placeholders-and-va
 import { FileUpload } from "../components/ui/file-upload";
 import { Modal, ModalBody, ModalContent, useModal } from "../components/ui/animated-modal"; 
 
+// --- API CONFIGURATION ---
+const API_URL = "http://localhost:8000/chat";
+
 // --- START: Component for the Modal Content (The Two-Step Upload) ---
 const DocumentUploadContent = ({ onFileUpload }) => {
     const [selectedFile, setSelectedFile] = useState(null);
@@ -49,9 +52,9 @@ const DocumentUploadContent = ({ onFileUpload }) => {
         </ModalContent>
     );
 };
-// --- END: Component for the Modal Content (The Two-Step Upload) ---
+// --- END: Component for the Modal Content ---
 
-// --- START: Upload Button Component (With glow) ---
+// --- START: Upload Button Component ---
 const UploadButton = () => {
     const { setOpen } = useModal(); 
     
@@ -102,53 +105,111 @@ const BotIcon = () => (
 const ChatbotPage = () => {
     const placeholders = [
         "What's the weather like?",
-        "Tell me a joke.",
-        "What is the meaning of life?",
-        "Can you help me with a task?",
-        "What is your name?",
+        "Check inventory for Laptop",
+        "What is the stock price of AAPL?",
+        "Drug interactions for Aspirin?",
+        "Tell me about parking permits.",
     ];
 
     const [messages, setMessages] = useState([
-        { text: "Hi there! I'm your AI assistant. How can I help you today? Try asking me a question or uploading a document for context.", sender: "bot" },
+        { text: "Hi there! I'm your AI assistant. I can help with Inventory, Public Policy, Financial Markets, and Healthcare queries.", sender: "bot" },
     ]);
+    const [isLoading, setIsLoading] = useState(false);
     const chatContainerRef = useRef(null);
 
     const handleChange = () => {};
 
-    const onSubmit = (value) => {
+    // --- MAIN API INTEGRATION ---
+    const onSubmit = async (value) => {
         if (value.trim() === "") return;
 
+        // 1. Add User Message immediately
         const userMessage = { text: value, sender: "user" };
         setMessages((prevMessages) => [...prevMessages, userMessage]);
+        setIsLoading(true);
 
-        // Simulate bot response
-        setTimeout(() => {
-            const botResponse = { text: "Got it! Your query has been received. This is a simulated response to: '" + value + "'.", sender: "bot" };
+        try {
+            // 2. Call FastAPI Backend
+            const response = await fetch(API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    message: value,
+                    user_context: "general" // Default context
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error("Server error");
+            }
+
+            const data = await response.json();
+
+            // 3. Add Bot Response
+            const botResponse = { 
+                text: data.response, 
+                sender: "bot",
+                // Optional: You can display which tool was used if you want
+                // toolUsed: data.used_tool 
+            };
             setMessages((prevMessages) => [...prevMessages, botResponse]);
-        }, 1000);
+
+        } catch (error) {
+            console.error("API Error:", error);
+            const errorMessage = { text: "⚠️ Error connecting to the Orchestrator. Is the backend running?", sender: "bot" };
+            setMessages((prevMessages) => [...prevMessages, errorMessage]);
+        } finally {
+            setIsLoading(false);
+        }
     };
 
-    const handleFileUpload = (file) => {
-        const fileMessage = { text: `✅ Document uploaded: ${file.name}. Analyzing content for context...`, sender: "user" };
+    // --- FILE UPLOAD INTEGRATION ---
+    const handleFileUpload = async (file) => {
+        // Since the backend provided currently only accepts text messages via /chat,
+        // we will simulate the file upload visual, but send a text prompt to the backend
+        // to acknowledge the context.
+        
+        const fileMessage = { text: `✅ Document uploaded: ${file.name}.`, sender: "user" };
         setMessages((prevMessages) => [...prevMessages, fileMessage]);
+        setIsLoading(true);
+
+        try {
+            // Send a "system-like" message to the bot so it knows context was added
+            const prompt = `I have just uploaded a document named "${file.name}". Please acknowledge this and be ready to answer questions about it.`;
+            
+            const response = await fetch(API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: prompt, user_context: "general" }),
+            });
+
+            const data = await response.json();
+            
+            setMessages((prevMessages) => [...prevMessages, { text: data.response, sender: "bot" }]);
+
+        } catch (error) {
+            setMessages((prevMessages) => [...prevMessages, { text: "Error analyzing file context.", sender: "bot" }]);
+        } finally {
+            setIsLoading(false);
+        }
     }
     
-    // Auto-scroll to the bottom of the chat when messages change
+    // Auto-scroll to the bottom
     useEffect(() => {
         if (chatContainerRef.current) {
             chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
         }
-    }, [messages]);
+    }, [messages, isLoading]);
 
     return (
-        // Set main container to relative for absolute children and overflow-hidden
         <div className="w-full h-screen bg-black relative overflow-hidden">
             
-            {/* 1. Subtle Background Pattern Layer (z-0) */}
+            {/* 1. Subtle Background Pattern Layer */}
             <div 
                 className="absolute inset-0 z-0 opacity-10"
                 style={{
-                    // Creates a subtle dotted pattern using CSS gradient
                     backgroundImage: 'radial-gradient(circle at center, #1f2937 1px, transparent 0)',
                     backgroundSize: '20px 20px',
                 }}
@@ -159,15 +220,12 @@ const ChatbotPage = () => {
                     <DocumentUploadContent onFileUpload={handleFileUpload} />
                 </ModalBody> 
                 
-                {/* 2. Vortex Container (z-10) and its content wrapper */}
                 <VortexContainer
                     backgroundColor="transparent" 
                     range={16}
                     speed={1.5}
                     hue={270}
-                    // containerClassName: ensures the Vortex component's outer div spans full screen
                     containerClassName="absolute inset-0"
-                    // className: applies to the content wrapper div (where children go)
                     className="flex items-center flex-col justify-end px-4 py-10 h-full min-h-[calc(100vh)] pt-16" 
                 >
                     <div className="flex-grow w-full max-w-4xl mx-auto flex flex-col justify-end">
@@ -184,35 +242,45 @@ const ChatbotPage = () => {
                                     </p>
                                 </div>
                             ) : (
-                                messages.map((message, index) => (
-                                    <div
-                                        key={index}
-                                        className={`flex ${
-                                            message.sender === "user" ? "justify-end" : "justify-start"
-                                        } mb-6`}
-                                    >
-                                        {/* BOT Message: Include Icon */}
-                                        {message.sender === "bot" && (
-                                            <div className="mr-3 mt-1 flex-shrink-0">
-                                                <BotIcon />
-                                            </div>
-                                        )}
-                                        
+                                <>
+                                    {messages.map((message, index) => (
                                         <div
-                                            className={`${
-                                                message.sender === "user"
-                                                    ? "bg-purple-600/90 text-white rounded-tr-md rounded-bl-3xl"
-                                                    : "bg-zinc-800/90 text-gray-100 rounded-tl-md rounded-br-3xl"
-                                            } py-3 px-5 max-w-md shadow-xl rounded-3xl break-words`}
+                                            key={index}
+                                            className={`flex ${
+                                                message.sender === "user" ? "justify-end" : "justify-start"
+                                            } mb-6`}
                                         >
-                                            {message.text}
+                                            {message.sender === "bot" && (
+                                                <div className="mr-3 mt-1 flex-shrink-0">
+                                                    <BotIcon />
+                                                </div>
+                                            )}
+                                            
+                                            <div
+                                                className={`${
+                                                    message.sender === "user"
+                                                        ? "bg-purple-600/90 text-white rounded-tr-md rounded-bl-3xl"
+                                                        : "bg-zinc-800/90 text-gray-100 rounded-tl-md rounded-br-3xl"
+                                                } py-3 px-5 max-w-md shadow-xl rounded-3xl break-words`}
+                                            >
+                                                {message.text}
+                                            </div>
                                         </div>
-                                    </div>
-                                ))
+                                    ))}
+                                    {/* Loading Indicator */}
+                                    {isLoading && (
+                                        <div className="flex justify-start mb-6 animate-pulse">
+                                            <div className="mr-3 mt-1 flex-shrink-0"><BotIcon /></div>
+                                            <div className="bg-zinc-800/50 text-gray-400 rounded-tl-md rounded-br-3xl py-3 px-5 max-w-md rounded-3xl italic">
+                                                Thinking...
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </div>
 
-                        {/* Visual Separator/Hint */}
+                        {/* Visual Separator */}
                         <div className="w-full h-px mt-6 mb-4 bg-gradient-to-r from-transparent via-purple-500/50 to-transparent"></div>
 
 
