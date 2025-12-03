@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import ReactMarkdown from 'react-markdown'; // <<-- New Import
 // Assuming Vortex is imported as VortexContainer in your original code
 import { Vortex as VortexContainer } from "../components/ui/vortex";
 import { PlaceholdersAndVanishInput } from "../components/ui/placeholders-and-vanish-input";
@@ -7,6 +8,36 @@ import { Modal, ModalBody, ModalContent, useModal } from "../components/ui/anima
 
 // --- API CONFIGURATION ---
 const API_URL = "http://localhost:8000/chat";
+
+// --- START: Component for Rendering Markdown ---
+const MarkdownMessage = ({ content, sender }) => {
+    const isUser = sender === "user";
+    
+    return (
+        // The container div defines the bubble shape and color
+        <div
+            className={`${
+                isUser
+                    ? "bg-purple-600/90 text-white rounded-tr-md rounded-bl-3xl"
+                    : "bg-zinc-800/90 text-gray-100 rounded-tl-md rounded-br-3xl"
+            } py-3 px-5 max-w-md shadow-xl rounded-3xl break-words whitespace-pre-wrap`}
+        >
+            <ReactMarkdown
+                // Customize HTML rendering for a consistent look
+                components={{
+                    h3: ({ node, ...props }) => (
+                        <h3 className="text-lg font-semibold text-purple-300 mt-2 mb-1" {...props} />
+                    ),
+                    strong: ({ node, ...props }) => <strong className="font-extrabold text-white" {...props} />,
+                    p: ({ node, ...props }) => <p className="mb-0" {...props} />, // Ensure paragraphs don't add extra margins
+                    // Add more component overrides as needed (e.g., ul, li)
+                }}
+            >
+                {content}
+            </ReactMarkdown>
+        </div>
+    );
+};
 
 // --- START: Component for the Modal Content (The Two-Step Upload) ---
 const DocumentUploadContent = ({ onFileUpload }) => {
@@ -98,11 +129,11 @@ const BotIcon = () => (
         </svg>
     </div>
 );
-// --- END: Bot Icon Component ---
 
 
-// --- START: ChatbotPage Component ---
 const ChatbotPage = () => {
+    // ... (placeholders, useState, useRef remain the same) ...
+
     const placeholders = [
         "What's the weather like?",
         "Check inventory for Laptop",
@@ -256,15 +287,9 @@ const ChatbotPage = () => {
                                                 </div>
                                             )}
                                             
-                                            <div
-                                                className={`${
-                                                    message.sender === "user"
-                                                        ? "bg-purple-600/90 text-white rounded-tr-md rounded-bl-3xl"
-                                                        : "bg-zinc-800/90 text-gray-100 rounded-tl-md rounded-br-3xl"
-                                                } py-3 px-5 max-w-md shadow-xl rounded-3xl break-words`}
-                                            >
-                                                {message.text}
-                                            </div>
+                                            {/* RENDER THE MARKDOWN HERE */}
+                                            <MarkdownMessage content={message.text} sender={message.sender} />
+                                            
                                         </div>
                                     ))}
                                     {/* Loading Indicator */}
