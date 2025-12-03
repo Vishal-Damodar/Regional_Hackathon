@@ -240,15 +240,14 @@ async def lifespan(app: FastAPI):
 
     mcp_client = MultiServerMCPClient({
         "finance": {
-            "command": "python",
-            "args": ["finance_server.py"], 
-            "transport": "stdio"
+            "transport": "sse",  # <--- CHANGED
+            "url": "http://localhost:8001/mcp/sse", # <--- Endpoint defined by mcp.mount_fastapi
         }
     })
 
     try:
         print("⏳ LIFESPAN: Connecting to Finance MCP Server...")
-        mcp_tools = await mcp_client.get_tools()
+        mcp_tools = await mcp_client.get_tools()    
         print(f"✅ LIFESPAN: Loaded {len(mcp_tools)} MCP tools")
 
         all_tools = local_tools + mcp_tools

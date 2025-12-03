@@ -1,15 +1,24 @@
 import json
 import requests
+import uvicorn
+from fastapi import FastAPI
 import yfinance as yf
 import urllib3
 import pandas as pd
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 from langsmith import traceable
+from langsmith.middleware import TracingMiddleware
 
 # =========================================================
 # 1️⃣ SSL PATCHING (Isolated to this server)
 # =========================================================
+
+app = FastAPI(title="Finance MCP Server")
+
+# This reads 'langsmith-trace' headers from incoming requests
+app.add_middleware(TracingMiddleware) 
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Patch top-level requests
@@ -46,7 +55,7 @@ def get_yf_session():
 # =========================================================
 # 3️⃣ MCP SERVER SETUP & TOOLS
 # =========================================================
-mcp = FastMCP("Finance Service")
+mcp = FastMCP(name="Finance Service")
 
 @traceable(run_type="tool", name="Market Data Fetcher")
 @mcp.tool()
@@ -191,6 +200,9 @@ def get_financial_advice(ticker: str) -> str:
 
     except Exception as e:
         return f"Error running financial analysis for {ticker}: {str(e)}"
+    
+app.mount("/mcp", mcp.sse_app())
 
 if __name__ == "__main__":
-    mcp.run()
+    # Run as a web server on a specific port (e.g., 8001)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
