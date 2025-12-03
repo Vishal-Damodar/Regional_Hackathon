@@ -1,3 +1,1 @@
-streamlit==1.36.0
-requests
-httpx
+streamlit

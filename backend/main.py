@@ -1,35 +1,42 @@
 import os
 import json
+import shutil
 import httpx
+import requests
 import random
-import yfinance as yf  
-import urllib3  
-import pandas as pd # <-- NEW IMPORT
-import pandas_ta as ta # <-- NEW IMPORT
-from typing import List, Optional
-from datetime import datetime, timedelta # <-- MODIFIED IMPORT (added timedelta)
+from typing import List, Optional, Annotated
+from typing_extensions import TypedDict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # LangChain Imports
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_chroma import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
+
+# LangGraph Imports
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import MemorySaver
 
 load_dotenv()
 
 # =========================================================
-# 1️⃣ BYPASS SSL ERRORS GLOBALLY (Required for some corporate environments)
+# 1️⃣ BYPASS SSL ERRORS GLOBALLY
 # =========================================================
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Patch top-level requests functions
+# Patch requests
 methods = ("get", "post", "delete", "options", "head", "patch", "put")
 for method in methods:
     original = getattr(requests, method)
@@ -38,7 +45,7 @@ for method in methods:
         return original(*args, **kwargs)
     setattr(requests, method, insecure_request)
 
-# Patch Session objects because libraries like yfinance use them internally
+# Patch Session
 original_session_request = requests.Session.request
 def insecure_session_request(self, method, url, *args, **kwargs):
     kwargs["verify"] = False
@@ -47,8 +54,6 @@ requests.Session.request = insecure_session_request
 
 client = httpx.Client(verify=False)
 
-# Initialize the LLM
-# IMPORTANT: Replace with your actual LLM endpoint and model if different
 llm = ChatOpenAI(
     base_url="https://genailab.tcs.in",
     model="azure_ai/genailab-maas-DeepSeek-V3-0324",
@@ -58,286 +63,179 @@ llm = ChatOpenAI(
 )
 
 # =========================================================
-# 2️⃣ MOCK DATA LAYER (Hybrid Knowledge Base)
+# 2️⃣ MOCK DATA LAYER (Local Knowledge Base)
 # =========================================================
-
 INVENTORY_DB = {
-    "SKU-001": {"name": "Laptop Pro X", "stock": 12, "reorder_level": 20, "supplier_lead_time": "5 days"},
-    "SKU-002": {"name": "Wireless Mouse", "stock": 500, "reorder_level": 100, "supplier_lead_time": "2 days"},
-    "SKU-003": {"name": "Monitor 4K", "stock": 5, "reorder_level": 15, "supplier_lead_time": "10 days"}
+    "SKU-001": {"name": "Laptop Pro X", "stock": 12, "reorder_level": 20},
+    "SKU-002": {"name": "Wireless Mouse", "stock": 500, "reorder_level": 100},
 }
-
 POLICY_DOCS = {
-    "parking": "Residents can apply for a street parking permit if they live in Zone A. Cost is $50/year. Processing time is 3 business days.",
-    "waste": "Garbage collection happens on Tuesdays. Large item pickup requires a scheduled appointment via the city portal.",
-    "voting": "To vote in municipal elections, you must be registered 30 days prior. Polling stations open at 7 AM."
+    "parking": "Residents can apply for a street parking permit if they live in Zone A.",
 }
-
 DRUG_DB = {
-    "aspirin": {"interactions": ["warfarin", "ibuprofen"], "severity": "High", "description": "Increases bleeding risk."},
-    "tylenol": {"interactions": ["alcohol"], "severity": "Moderate", "description": "Risk of liver damage."}
+    "aspirin": {"interactions": ["warfarin", "ibuprofen"], "severity": "High"},
 }
 
 # =========================================================
-# 3️⃣ TOOL DEFINITIONS (The "Hands" - including the new Financial Agent)
+# 🆕 SELF-LEARNING LAYER
 # =========================================================
+FEEDBACK_FILE = "agent_rules.json"
 
-# --- Utility Function for Session Setup ---
-def get_yf_session():
-    """Returns a yfinance-compatible session with SSL verification disabled."""
-    session = requests.Session()
-    session.verify = False
+def load_rules():
+    if os.path.exists(FEEDBACK_FILE):
+        try:
+            with open(FEEDBACK_FILE, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
+    return []
+
+def save_rule(trigger: str, instruction: str):
+    rules = load_rules()
+    # Avoid duplicates
+    if not any(r['trigger'] == trigger and r['instruction'] == instruction for r in rules):
+        rules.append({"trigger": trigger, "instruction": instruction})
+        with open(FEEDBACK_FILE, "w") as f:
+            json.dump(rules, f, indent=2)
+        print(f"🧠 LEARNING: Added new rule for '{trigger}'")
+
+# =========================================================
+# 3️⃣ RAG SETUP & TOOLS
+# =========================================================
+DB_DIR = "./chroma_db"
+
+def get_vectorstore():
+    """Returns the persistent vector store connection."""
+    return Chroma(
+        persist_directory=DB_DIR, 
+        embedding_function=OpenAIEmbeddings(
+            base_url="https://genailab.tcs.in",
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="azure_ai/genailab-maas-text-embedding-3-small",
+            http_client=client 
+        )
+    )
+
+@tool
+def search_financial_reports(query: str):
+    """
+    Useful for answering qualitative questions about company strategy, risks, 
+    and earnings reports based on uploaded PDF documents.
+    """
+    print(f"🔎 RAG: Searching persistent DB for '{query}'...")
     try:
-        from curl_cffi import requests as c_requests
-        # Use curl_cffi for robustness if available
-        return c_requests.Session(impersonate="chrome", verify=False)
-    except ImportError:
-        # Fallback to standard requests session
-        return session
+        vectorstore = get_vectorstore()
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+        relevant_docs = retriever.invoke(query)
+        
+        if not relevant_docs:
+            return "No relevant financial information found in the uploaded documents."
+            
+        context = "\n\n".join([doc.page_content for doc in relevant_docs])
+        return context
+    except Exception as e:
+        return f"Error retrieving documents: {str(e)}"
 
-
-# Global storage
-app_state = {
-    "llm_with_tools": None, 
-    "tools_map": {} 
-}
-
-# =========================================================
-# 2️⃣ LOCAL TOOLS
-# =========================================================
 @tool
 def check_inventory(sku_or_product_name: str):
     """Useful for checking stock levels."""
     print(f"🛠️ LOCAL TOOL: Checking inventory for {sku_or_product_name}")
-    return json.dumps([{"name": "Laptop Pro", "stock": 12}])
+    results = []
+    for sku, data in INVENTORY_DB.items():
+        if sku_or_product_name.lower() in data['name'].lower() or sku_or_product_name.lower() in sku.lower():
+            results.append(data)
+    if not results:
+        return f"No inventory records found for '{sku_or_product_name}'."
+    return json.dumps(results)
 
 @tool
 def search_public_policy(query: str):
-    """
-    Useful for answering citizen questions about public services, rules, regulations, and permits.
-    Input should be a specific topic like 'parking permit' or 'waste collection'.
-    """
+    """Useful for answering citizen questions about public services and rules."""
     query = query.lower()
     found_info = []
     for topic, content in POLICY_DOCS.items():
         if topic in query or query in topic:
             found_info.append(content)
-    
     if not found_info:
-        # Fallback to general search if direct match fails
-        return "I searched the policy documents but couldn't find a specific match. Please contact the city clerk."
+        return "No specific policy found."
     return "\n".join(found_info)
-
-
-@tool
-def get_market_data(ticker: str):
-    """
-    Useful for financial analysis. Gets LIVE real-time stock price and recent news for a ticker symbol (e.g., AAPL, TSLA, MSFT) using Yahoo Finance.
-    NOTE: Use get_financial_advice for BUY/SELL recommendations.
-    """
-    print(f"DEBUG: Entering get_market_data with ticker: {ticker}")
-    try:
-        ticker = ticker.upper()
-        
-        session = get_yf_session()
-        stock = yf.Ticker(ticker, session=session)
-        
-        print(f"DEBUG: yf.Ticker object created for {ticker}. Fetching data...")
-        
-        price = None
-        currency = "USD"
-        
-        # 3. Fetch Price (Try fast_info -> info)
-        try:
-            price = stock.fast_info.get('last_price')
-            currency = stock.fast_info.get('currency')
-            
-            if price is None:
-                raise ValueError("fast_info returned None")
-                
-        except Exception:
-            try:
-                info = stock.info
-                if info:
-                    price = info.get('currentPrice') or info.get('regularMarketPrice')
-                    currency = info.get('currency')
-                else:
-                    pass
-            except Exception:
-                pass
-
-        # 4. Fetch News
-        news_items = []
-        try:
-            news_items = stock.news[:3] if stock.news else []
-        except Exception:
-            pass
-
-        clean_news = [
-            {"title": item.get("title"), "link": item.get("link")} 
-            for item in news_items
-        ]
-
-        if not price:
-            return f"Could not fetch price data for {ticker}. Check ticker validity."
-
-        data = {
-            "ticker": ticker,
-            "current_price": round(price, 2),
-            "currency": currency,
-            "latest_news": clean_news
-        }
-        return json.dumps(data)
-        
-    except Exception as e:
-        print(f"DEBUG: CRITICAL ERROR in get_market_data: {e}")
-        return f"Error fetching market data for {ticker}: {str(e)}"
-
-
-# --- 🌟 NEW TOOL: The Financial Advisor Agent Logic 🌟 ---
-# --- 🌟 NEW TOOL: The Financial Advisor Agent Logic (FIXED VERSION) 🌟 ---
-@tool
-def get_financial_advice(ticker: str):
-    """
-    The expert Financial Advisor. Useful for technical analysis, calculating Support/Resistance (S&R), 
-    and generating a specific BUY, SELL, or HOLD recommendation for a stock ticker. 
-    Requires at least 60 days of historical data for analysis.
-    """
-    print(f"DEBUG: Entering get_financial_advice with ticker: {ticker}")
-    ticker = ticker.upper()
-    
-    try:
-        session = get_yf_session()
-        stock = yf.Ticker(ticker, session=session)
-
-        # 1. Fetch Historical Data (Last 90 days of daily data)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=90) 
-        
-        history = stock.history(start=start_date, end=end_date, interval="1d")
-        
-        if history.empty or len(history) < 60:
-            return f"Error: Insufficient historical data found for {ticker} (need min 60 days)."
-        
-        df = pd.DataFrame(history)
-        
-        # 2. Calculate Technical Indicators (FIXED LOGIC HERE)
-        
-        # --- FIXED: Calculate Pivot Points using direct ta.pivot_points() ---
-        R1, S1 = None, None # Initialize S&R values
-        try:
-            # Pass the High, Low, Close series directly to the function
-            pp_df = ta.pivot_points(
-                df['High'], df['Low'], df['Close'], 
-                # We append later, so we omit append=True here if using direct call
-            )
-            # Merge the resulting DataFrame back into the main DF
-            df = pd.merge(df, pp_df, left_index=True, right_index=True, how='left')
-            print("DEBUG: Pivot Points calculated and merged.")
-        except Exception as e:
-            # If PP calculation fails, we just move on
-            print(f"DEBUG: Pivot Points calculation failed: {e}. S&R advice will be limited.")
-
-        # Calculate RSI (This usually works fine with .ta)
-        df.ta.rsi(append=True)
-        
-        # Calculate Moving Averages 
-        df.ta.sma(length=20, append=True, col_names=['SMA_20'])
-        df.ta.sma(length=50, append=True, col_names=['SMA_50'])
-        
-        # Get the latest data point
-        latest = df.iloc[-1]
-        
-        # 3. Extract Values (Using improved checks for None/NaN)
-        latest_price = latest['Close']
-        
-        # Pivot Point Resistance (PP_R1) and Support (PP_S1)
-        # Check for column existence and then check for NaN/None
-        if 'PP_R1' in latest and pd.notna(latest['PP_R1']):
-            R1 = latest['PP_R1']
-        
-        if 'PP_S1' in latest and pd.notna(latest['PP_S1']):
-            S1 = latest['PP_S1']
-        
-        rsi_value = latest['RSI_14']
-        sma_50 = latest['SMA_50']
-        
-        # 4. Generate the Buy/Sell Signal and Reasoning
-        recommendation = "HOLD"
-        reasoning = []
-
-        # Define proximity for S&R check (e.g., within 1.5% of the level)
-        PROXIMITY_THRESHOLD = 0.015 
-        
-        # --- BUY Logic (Near Support / Oversold) ---
-        if rsi_value < 35 and latest_price < sma_50:
-            recommendation = "STRONG BUY"
-            reasoning.append(f"Stock is **OVERSOLD** (RSI: {round(rsi_value, 2)}).")
-            if S1 is not None and (S1 * (1 - PROXIMITY_THRESHOLD)) < latest_price < (S1 * (1 + PROXIMITY_THRESHOLD)):
-                reasoning.append(f"It is currently **bouncing off a key Support level (S1: {round(S1, 2)})**.")
-            else:
-                reasoning.append(f"Trading below the 50-day average, indicating potential value.")
-
-        elif rsi_value < 45 and latest_price > sma_50:
-            recommendation = "BUY"
-            reasoning.append(f"The stock is in an uptrend (above 50-day SMA: {round(sma_50, 2)}) and showing strength after a dip (RSI: {round(rsi_value, 2)}).")
-
-        # --- SELL/AVOID Logic (Near Resistance / Overbought) ---
-        elif rsi_value > 75 and latest_price > sma_50:
-            recommendation = "STRONG SELL"
-            reasoning.append(f"Stock is heavily **OVERBOUGHT** (RSI: {round(rsi_value, 2)}).")
-            if R1 is not None and (R1 * (1 - PROXIMITY_THRESHOLD)) < latest_price < (R1 * (1 + PROXIMITY_THRESHOLD)):
-                reasoning.append(f"It is currently **struggling at a key Resistance level (R1: {round(R1, 2)})**.")
-            else:
-                reasoning.append(f"Trading well above its 50-day average, suggesting a correction is due.")
-
-        elif rsi_value > 65 and latest_price < sma_50:
-            recommendation = "SELL"
-            reasoning.append(f"Stock is **Overbought** (RSI: {round(rsi_value, 2)}) but failing to hold the 50-day average. A downward move is likely.")
-
-        # --- HOLD/NEUTRAL Logic ---
-        else:
-            recommendation = "HOLD"
-            reasoning.append(f"The stock is trading neutrally (RSI: {round(rsi_value, 2)}). No strong S&R or momentum signal for immediate action.")
-
-        # 5. Compile and Return the Result
-        advice_data = {
-            "ticker": ticker,
-            "recommendation": recommendation,
-            "current_price": round(latest_price, 2),
-            "key_indicators": {
-                "RSI_14": round(rsi_value, 2),
-                "SMA_50": round(sma_50, 2),
-                "Resistance_R1": round(R1, 2) if R1 is not None else "N/A",
-                "Support_S1": round(S1, 2) if S1 is not None else "N/A"
-            },
-            "reasoning": " ".join(reasoning)
-        }
-        
-        return json.dumps(advice_data)
-        
-    except Exception as e:
-        print(f"DEBUG: Financial Advice Error: {e}")
-        return f"Error running financial analysis for {ticker}: {str(e)}. Check ticker symbol or data availability."
 
 @tool
 def check_drug_interaction(drug_name: str):
     """Useful for drug interaction queries."""
-    return "No interactions found."
+    drug_name = drug_name.lower()
+    data = DRUG_DB.get(drug_name)
+    if not data:
+        return "No interactions found."
+    return json.dumps(data)
 
-# Bind all tools, including the new financial advisor
-tools = [check_inventory, search_public_policy, get_market_data, check_drug_interaction, get_financial_advice] # <-- MODIFIED
-llm_with_tools = llm.bind_tools(tools)
+local_tools = [check_inventory, search_public_policy, check_drug_interaction, search_financial_reports]
+
+app_state = {
+    "graph": None
+}
 
 # =========================================================
-# 3️⃣ LIFESPAN (Stateless Initialization)
+# 4️⃣ LANGGRAPH DEFINITION
+# =========================================================
+
+class State(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+def create_agent_graph(tools_list):
+    memory = MemorySaver()
+    llm_with_tools = llm.bind_tools(tools_list)
+
+    def agent_node(state: State):
+        # 1. LOAD RULES (Self-Learning Context)
+        rules = load_rules()
+        # Handle case where state["messages"] might be empty initially (rare but possible)
+        if not state["messages"]:
+             user_msg = ""
+        else:
+             user_msg = state["messages"][-1].content
+        
+        if isinstance(user_msg, str):
+            relevant_instructions = [
+                r["instruction"] for r in rules 
+                if r["trigger"].lower() in user_msg.lower()
+            ]
+        else:
+            relevant_instructions = []
+        
+        system_prompt = "You are a helpful assistant."
+        if relevant_instructions:
+            system_prompt += f"\n\n⚠️ IMPORTANT USER RULES:\n- " + "\n- ".join(relevant_instructions)
+            
+        # Prepend the system prompt dynamically
+        messages = [SystemMessage(content=system_prompt)] + state["messages"]
+        return {"messages": [llm_with_tools.invoke(messages)]}
+
+    workflow = StateGraph(State)
+    workflow.add_node("agent", agent_node)
+    workflow.add_node("tools", ToolNode(tools_list))
+
+    workflow.add_edge(START, "agent")
+    workflow.add_conditional_edges("agent", tools_condition)
+    workflow.add_edge("tools", "agent")
+
+    # 🆕 CRITICAL CHANGE: Interrupt before tools execute
+    return workflow.compile(
+        checkpointer=memory, 
+        interrupt_before=["tools"] 
+    )
+
+# =========================================================
+# 5️⃣ LIFESPAN
 # =========================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("\n🔄 LIFESPAN: Initializing MCP Client...")
     
-    # 1. Instantiate Client (Stateless Factory)
-    # We do NOT use 'async with' here.
+    if not os.path.exists(DB_DIR):
+        os.makedirs(DB_DIR)
+        print(f"📁 LIFESPAN: Created vector DB directory at {DB_DIR}")
+
     mcp_client = MultiServerMCPClient({
         "finance": {
             "command": "python",
@@ -347,17 +245,15 @@ async def lifespan(app: FastAPI):
     })
 
     try:
-        # 2. Fetch Tools (This opens a temporary connection)
-        # The client will start the server, get tools, and kill the server automatically.
+        print("⏳ LIFESPAN: Connecting to Finance MCP Server...")
         mcp_tools = await mcp_client.get_tools()
-        print(f"✅ LIFESPAN: Loaded {len(mcp_tools)} MCP tools: {[t.name for t in mcp_tools]}")
+        print(f"✅ LIFESPAN: Loaded {len(mcp_tools)} MCP tools")
 
-        # 3. Combine & Index
         all_tools = local_tools + mcp_tools
-        app_state["tools_map"] = {t.name: t for t in all_tools}
         
-        # 4. Bind to LLM
-        app_state["llm_with_tools"] = llm.bind_tools(all_tools)
+        print("📊 LIFESPAN: Compiling LangGraph with Memory...")
+        app_state["graph"] = create_agent_graph(all_tools)
+        print("🚀 LIFESPAN: Graph Ready.")
         
         yield
         
@@ -365,14 +261,12 @@ async def lifespan(app: FastAPI):
         print(f"❌ LIFESPAN ERROR: {e}")
         raise e
     
-    # 5. NO CLEANUP REQUIRED
-    # Since the client is stateless, there is no .close() method to call.
     print("🛑 LIFESPAN: Application shutdown.")
 
 # =========================================================
-# 4️⃣ FASTAPI APP
+# 6️⃣ FASTAPI APP
 # =========================================================
-app = FastAPI(title="Unified GenAI Orchestration Platform", lifespan=lifespan)
+app = FastAPI(title="Unified GenAI Platform (HITL Enabled)", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -383,70 +277,96 @@ app.add_middleware(
 )
 
 class ChatRequest(BaseModel):
-    message: str
-    user_context: Optional[str] = "general" 
+    message: Optional[str] = None
+    thread_id: str = "default_session"
+    action: Optional[str] = None # "resume" or "feedback"
+    feedback_text: Optional[str] = None 
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
-    print(f"\n📩 REQUEST: {request.message}")
-    
-    model = app_state["llm_with_tools"]
-    tools_map = app_state["tools_map"]
-    
-    if not model:
-        raise HTTPException(status_code=500, detail="System not initialized.")
+    graph = app_state["graph"]
+    if not graph:
+        raise HTTPException(status_code=500, detail="System not initialized")
 
-    messages = [
-        SystemMessage(content="You are a helpful assistant. Use 'get_market_data' for stock prices."),
-        HumanMessage(content=request.message)
-    ]
+    config = {"configurable": {"thread_id": request.thread_id}}
 
-    # 1. First LLM Call
-    print("🤖 AI: Thinking...")
-    ai_msg = model.invoke(messages)
-    messages.append(ai_msg)
-
-    # 2. Check for Tool Calls
-    if ai_msg.tool_calls:
-        print("⚙️ TOOL CALL DETECTED!")
+    # CASE A: Standard User Message
+    if not request.action:
+        inputs = {"messages": [HumanMessage(content=request.message)]}
+        # Run until interrupt or finish
+        result = await graph.ainvoke(inputs, config=config)
         
-        for tool_call in ai_msg.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_id = tool_call["id"]
-            
-            print(f"👉 EXECUTING: {tool_name} with args: {tool_args}")
-            
-            selected_tool = tools_map.get(tool_name)
-            
-            if selected_tool:
-                try:
-                    # EXECUTE TOOL
-                    # Note: For MCP tools, this will internally:
-                    # Start Process -> Run Tool -> Stop Process
-                    tool_output = await selected_tool.ainvoke(tool_args)
-                    
-                    print(f"✅ TOOL OUTPUT: {str(tool_output)}...")
-                    
-                    messages.append(ToolMessage(
-                        tool_call_id=tool_id,
-                        content=str(tool_output)
-                    ))
-                except Exception as e:
-                    print(f"❌ TOOL ERROR: {e}")
-                    messages.append(ToolMessage(
-                        tool_call_id=tool_id,
-                        content=f"Error executing tool: {str(e)}"
-                    ))
-            else:
-                print(f"⚠️ Warning: Tool '{tool_name}' not found.")
+        # Check if we stopped because of an interrupt at "tools"
+        snapshot = graph.get_state(config)
+        if snapshot.next and snapshot.next[0] == "tools":
+            # Extract the tool call to show the user
+            last_msg = snapshot.values["messages"][-1]
+            if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                tool_call = last_msg.tool_calls[0]
+                return {
+                    "response": f"I want to execute: {tool_call['name']} with args {tool_call['args']}. Do you approve?",
+                    "status": "requires_approval",
+                    "tool_call": tool_call
+                }
+        
+        # If no interrupt, return final response
+        return {"response": result["messages"][-1].content, "status": "completed"}
 
-        # 3. Final LLM Call
-        print("🤖 AI: Generating final response...")
-        final_response = model.invoke(messages)
-        return {"response": final_response.content, "tool_used": str(ai_msg.tool_calls)}
+    # CASE B: User Approves ("resume")
+    elif request.action == "resume":
+        print("▶️ RESUMING Graph execution...")
+        # Passing None resumes execution from the saved state
+        result = await graph.ainvoke(None, config=config)
+        return {"response": result["messages"][-1].content, "status": "completed"}
 
-    return {"response": ai_msg.content, "tool_used": "None"}
+    # CASE C: User Corrects ("feedback")
+    elif request.action == "feedback":
+        print("🛑 FEEDBACK RECEIVED. Saving rule...")
+        # 1. Save the new rule
+        snapshot = graph.get_state(config)
+        # Find the last human message to use as the "Trigger"
+        msgs = snapshot.values["messages"]
+        last_human_msg = next((m for m in reversed(msgs) if isinstance(m, HumanMessage)), None)
+        
+        trigger_text = last_human_msg.content if last_human_msg else "general"
+        save_rule(trigger=trigger_text, instruction=request.feedback_text)
+        
+        # 2. Inject correction and force retry
+        correction_msg = HumanMessage(content=f"STOP. Don't do that. New Rule: {request.feedback_text}. Try again.")
+        result = await graph.ainvoke({"messages": [correction_msg]}, config=config)
+        
+        return {"response": result["messages"][-1].content, "status": "corrected"}
+    
+    
+@app.post("/ingest")
+async def ingest_document(file: UploadFile = File(...)):
+    print(f"📥 INGEST: Received file {file.filename}")
+    file_path = f"temp_{file.filename}"
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        loader = PyPDFLoader(file_path)
+        docs = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        splits = text_splitter.split_documents(docs)
+        
+        if not splits:
+            return {"status": "error", "message": "No text could be extracted."}
+
+        vectorstore = get_vectorstore()
+        vectorstore.add_documents(splits)
+        print(f"✅ INGEST: Added {len(splits)} chunks to DB.")
+        
+        return {"status": "success", "chunks_added": len(splits), "filename": file.filename}
+
+    except Exception as e:
+        print(f"❌ INGEST ERROR: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 if __name__ == "__main__":
     import uvicorn
