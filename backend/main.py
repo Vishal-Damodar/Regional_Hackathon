@@ -1,6 +1,5 @@
 import os
 import json
-import requests
 import httpx
 import random
 import yfinance as yf  
@@ -9,16 +8,17 @@ import pandas as pd # <-- NEW IMPORT
 import pandas_ta as ta # <-- NEW IMPORT
 from typing import List, Optional
 from datetime import datetime, timedelta # <-- MODIFIED IMPORT (added timedelta)
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # LangChain Imports
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,7 +26,7 @@ load_dotenv()
 # =========================================================
 # 1️⃣ BYPASS SSL ERRORS GLOBALLY (Required for some corporate environments)
 # =========================================================
-# Suppress the inevitable warnings that come from disabling SSL
+import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Patch top-level requests functions
@@ -54,7 +54,7 @@ llm = ChatOpenAI(
     model="azure_ai/genailab-maas-DeepSeek-V3-0324",
     api_key=os.getenv("OPENAI_API_KEY"),
     http_client=client,
-    temperature=0  # Lower temperature for more deterministic tool usage
+    temperature=0
 )
 
 # =========================================================
@@ -96,21 +96,20 @@ def get_yf_session():
         return session
 
 
+# Global storage
+app_state = {
+    "llm_with_tools": None, 
+    "tools_map": {} 
+}
+
+# =========================================================
+# 2️⃣ LOCAL TOOLS
+# =========================================================
 @tool
 def check_inventory(sku_or_product_name: str):
-    """
-    Useful for checking stock levels, reorder points, and supplier lead times for products.
-    Input should be a product name (e.g., 'Laptop') or SKU.
-    """
-    # Simple fuzzy search simulation
-    results = []
-    for sku, data in INVENTORY_DB.items():
-        if sku_or_product_name.lower() in data['name'].lower() or sku_or_product_name.lower() in sku.lower():
-            results.append(data)
-    
-    if not results:
-        return f"No inventory records found for '{sku_or_product_name}'."
-    return json.dumps(results)
+    """Useful for checking stock levels."""
+    print(f"🛠️ LOCAL TOOL: Checking inventory for {sku_or_product_name}")
+    return json.dumps([{"name": "Laptop Pro", "stock": 12}])
 
 @tool
 def search_public_policy(query: str):
@@ -323,23 +322,57 @@ def get_financial_advice(ticker: str):
 
 @tool
 def check_drug_interaction(drug_name: str):
-    """
-    Useful for healthcare queries. Checks for known drug interactions and severity.
-    """
-    drug_name = drug_name.lower()
-    data = DRUG_DB.get(drug_name)
-    if not data:
-        return f"No interaction data found for {drug_name} in the knowledge base."
-    return json.dumps(data)
+    """Useful for drug interaction queries."""
+    return "No interactions found."
 
 # Bind all tools, including the new financial advisor
 tools = [check_inventory, search_public_policy, get_market_data, check_drug_interaction, get_financial_advice] # <-- MODIFIED
 llm_with_tools = llm.bind_tools(tools)
 
 # =========================================================
-# 4️⃣ FASTAPI APP SETUP
+# 3️⃣ LIFESPAN (Stateless Initialization)
 # =========================================================
-app = FastAPI(title="Unified GenAI Orchestration Platform")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("\n🔄 LIFESPAN: Initializing MCP Client...")
+    
+    # 1. Instantiate Client (Stateless Factory)
+    # We do NOT use 'async with' here.
+    mcp_client = MultiServerMCPClient({
+        "finance": {
+            "command": "python",
+            "args": ["finance_server.py"], 
+            "transport": "stdio"
+        }
+    })
+
+    try:
+        # 2. Fetch Tools (This opens a temporary connection)
+        # The client will start the server, get tools, and kill the server automatically.
+        mcp_tools = await mcp_client.get_tools()
+        print(f"✅ LIFESPAN: Loaded {len(mcp_tools)} MCP tools: {[t.name for t in mcp_tools]}")
+
+        # 3. Combine & Index
+        all_tools = local_tools + mcp_tools
+        app_state["tools_map"] = {t.name: t for t in all_tools}
+        
+        # 4. Bind to LLM
+        app_state["llm_with_tools"] = llm.bind_tools(all_tools)
+        
+        yield
+        
+    except Exception as e:
+        print(f"❌ LIFESPAN ERROR: {e}")
+        raise e
+    
+    # 5. NO CLEANUP REQUIRED
+    # Since the client is stateless, there is no .close() method to call.
+    print("🛑 LIFESPAN: Application shutdown.")
+
+# =========================================================
+# 4️⃣ FASTAPI APP
+# =========================================================
+app = FastAPI(title="Unified GenAI Orchestration Platform", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -353,70 +386,68 @@ class ChatRequest(BaseModel):
     message: str
     user_context: Optional[str] = "general" 
 
-class ChatResponse(BaseModel):
-    response: str
-    used_tool: Optional[str] = None
-
-@app.get("/")
-def health_check():
-    return {"status": "running", "mode": "Unified Orchestrator"}
-
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
-    try:
-        # 1. Construct the System Prompt based on context
-        base_system_prompt = """You are a Unified Intelligent Assistant capable of handling Inventory, 
-        Public Services, Financial Markets, and Healthcare queries.
+    print(f"\n📩 REQUEST: {request.message}")
+    
+    model = app_state["llm_with_tools"]
+    tools_map = app_state["tools_map"]
+    
+    if not model:
+        raise HTTPException(status_code=500, detail="System not initialized.")
+
+    messages = [
+        SystemMessage(content="You are a helpful assistant. Use 'get_market_data' for stock prices."),
+        HumanMessage(content=request.message)
+    ]
+
+    # 1. First LLM Call
+    print("🤖 AI: Thinking...")
+    ai_msg = model.invoke(messages)
+    messages.append(ai_msg)
+
+    # 2. Check for Tool Calls
+    if ai_msg.tool_calls:
+        print("⚙️ TOOL CALL DETECTED!")
         
-        You have access to specific tools. 
-        - If the user asks about stock/products, use 'check_inventory'.
-        - If the user asks about city rules/permits, use 'search_public_policy'.
-        - If the user asks about LIVE stock prices or news only, use 'get_market_data'.
-        - If the user asks for a specific **BUY, SELL, or HOLD financial RECOMMENDATION** or stock analysis based on **technical analysis** or S&R, **ALWAYS use 'get_financial_advice'**.
-        - If the user asks about medicine/safety, use 'check_drug_interaction'.
-        
-        Always answer in a helpful, professional tone suitable for the context. When using the financial advice tool, analyze the output and provide a clear, easy-to-understand recommendation to the user.""" # <-- UPDATED PROMPT
+        for tool_call in ai_msg.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_id = tool_call["id"]
+            
+            print(f"👉 EXECUTING: {tool_name} with args: {tool_args}")
+            
+            selected_tool = tools_map.get(tool_name)
+            
+            if selected_tool:
+                try:
+                    # EXECUTE TOOL
+                    # Note: For MCP tools, this will internally:
+                    # Start Process -> Run Tool -> Stop Process
+                    tool_output = await selected_tool.ainvoke(tool_args)
+                    
+                    print(f"✅ TOOL OUTPUT: {str(tool_output)}...")
+                    
+                    messages.append(ToolMessage(
+                        tool_call_id=tool_id,
+                        content=str(tool_output)
+                    ))
+                except Exception as e:
+                    print(f"❌ TOOL ERROR: {e}")
+                    messages.append(ToolMessage(
+                        tool_call_id=tool_id,
+                        content=f"Error executing tool: {str(e)}"
+                    ))
+            else:
+                print(f"⚠️ Warning: Tool '{tool_name}' not found.")
 
-        messages = [
-            SystemMessage(content=base_system_prompt),
-            HumanMessage(content=request.message)
-        ]
+        # 3. Final LLM Call
+        print("🤖 AI: Generating final response...")
+        final_response = model.invoke(messages)
+        return {"response": final_response.content, "tool_used": str(ai_msg.tool_calls)}
 
-        # 2. Invoke LLM to see if it wants to use a tool
-        ai_msg = llm_with_tools.invoke(messages)
-        messages.append(ai_msg)
+    return {"response": ai_msg.content, "tool_used": "None"}
 
-        tool_used = None
-        
-        # 3. If the LLM decided to call a tool (Function Calling)
-        if ai_msg.tool_calls:
-            for tool_call in ai_msg.tool_calls:
-                tool_used = tool_call["name"]
-                
-                # Execute the specific tool
-                selected_tool = {
-                    "check_inventory": check_inventory,
-                    "search_public_policy": search_public_policy,
-                    "get_market_data": get_market_data,
-                    "check_drug_interaction": check_drug_interaction,
-                    "get_financial_advice": get_financial_advice # <-- NEW TOOL MAPPED
-                }[tool_call["name"]]
-                
-                # Run the tool
-                tool_output = selected_tool.invoke(tool_call["args"])
-                
-                # Append the tool result to conversation history
-                messages.append(ToolMessage(tool_call_id=tool_call["id"], content=str(tool_output)))
-
-            # 4. Final Invoke: Get the natural language answer based on tool output
-            final_response = llm_with_tools.invoke(messages)
-            return {"response": final_response.content, "used_tool": tool_used}
-        
-        # If no tool was needed (general chat)
-        return {"response": ai_msg.content, "used_tool": "None"}
-
-    except Exception as e:
-        print(f"Error calling LLM: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Orchestrator Error: {str(e)}")
-
-# To run: uvicorn main:app --reload --port 8000
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -24,3 +24,5 @@ langchain-openai
 
 
 yfinance
+langchain-mcp-adapters
+mcp
