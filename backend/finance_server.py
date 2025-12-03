@@ -5,6 +5,7 @@ import urllib3
 import pandas as pd
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
+from langsmith import traceable
 
 # =========================================================
 # 1️⃣ SSL PATCHING (Isolated to this server)
@@ -47,6 +48,7 @@ def get_yf_session():
 # =========================================================
 mcp = FastMCP("Finance Service")
 
+@traceable(run_type="tool", name="Market Data Fetcher")
 @mcp.tool()
 def get_market_data(ticker: str) -> str:
     """
@@ -102,6 +104,7 @@ def get_market_data(ticker: str) -> str:
         return f"Error in Finance MCP Server: {str(e)}"
 
 
+@traceable(run_type="tool", name="Financial Analyst Logic")
 @mcp.tool()
 def get_financial_advice(ticker: str) -> str:
     """

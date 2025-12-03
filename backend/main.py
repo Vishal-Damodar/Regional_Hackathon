@@ -28,6 +28,8 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 
+from langsmith import traceable
+
 load_dotenv()
 
 # =========================================================
@@ -339,6 +341,7 @@ async def chat_endpoint(request: ChatRequest):
     
     
 @app.post("/ingest")
+@traceable(run_type="chain", name="PDF Ingestion Pipeline") # <--- NEW: Wraps this in a trace
 async def ingest_document(file: UploadFile = File(...)):
     print(f"📥 INGEST: Received file {file.filename}")
     file_path = f"temp_{file.filename}"
