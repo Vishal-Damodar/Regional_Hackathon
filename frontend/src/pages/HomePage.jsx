@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-// 🚨 Ensure you have framer-motion installed: npm install framer-motion
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom"; 
 
@@ -115,8 +114,6 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
             
             onClose(); // Close the modal
             setCurrentStep(1); // Reset step for next time
-            // Data is kept in the navigated state, no need to clear local formData immediately
-            // setFormData({}); 
         }
     };
 
@@ -253,10 +250,15 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
 // --- MAIN HOME PAGE COMPONENT ---
 const HomePage = () => {
     const navigate = useNavigate(); 
-    const [isModalOpen, setIsModalOpen] = useState(false); // State for the new modal
+    const [isModalOpen, setIsModalOpen] = useState(false); // State for the grant modal
 
     const navigateToChatbot = () => {
         navigate("/chatbot"); 
+    };
+
+    const navigateToDashboard = () => {
+        // Redirect to the login page first
+        navigate("/login"); 
     };
 
     const openGrantModal = () => {
@@ -279,13 +281,13 @@ const HomePage = () => {
                     <TextGenerateEffect words="Unlocking critical funding for SMEs' sustainable future with AI-powered matching and compliance assistance." className="text-center text-sm md:text-xl text-neutral-300 mt-6 max-w-2xl" />
                 
                     {/* **START: BUTTONS CONTAINER** */}
-                    <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-6 mt-12">
+                    <div className="flex flex-col md:flex-row space-y-4 md:space-y-0 md:space-x-4 mt-12">
                         
                         {/* 🔎 FIND GRANTS BUTTON 🔎 */}
                         <button 
                             onClick={openGrantModal} 
                             className="
-                                px-8 
+                                px-6 
                                 py-3 
                                 bg-gradient-to-r 
                                 from-green-500 
@@ -315,12 +317,47 @@ const HomePage = () => {
                             <span>Find Grants</span>
                             <span role="img" aria-label="magnifying glass">🔎</span>
                         </button>
+                        
+                        {/* 📊 DASHBOARD BUTTON -> NOW LEADS TO LOGIN 🔑 */}
+                        {/* <button 
+                            onClick={navigateToDashboard} 
+                            className="
+                                px-6 
+                                py-3 
+                                bg-gradient-to-r 
+                                from-orange-500 
+                                to-red-500 
+                                text-white 
+                                font-extrabold 
+                                rounded-full 
+                                shadow-lg 
+                                shadow-orange-500/50 
+                                hover:from-orange-600 
+                                hover:to-red-600 
+                                hover:shadow-xl 
+                                hover:shadow-red-400/70 
+                                hover:translate-y-[-2px] 
+                                transition 
+                                duration-500 
+                                ease-in-out 
+                                focus:outline-none 
+                                focus:ring-4 
+                                focus:ring-orange-500 
+                                focus:ring-opacity-75
+                                text-lg
+                                flex items-center space-x-2
+                                cursor-pointer
+                            "
+                        >
+                            <span>Admin Login</span>
+                            <span role="img" aria-label="chart">🔑</span>
+                        </button> */}
 
                         {/* 🤖 CHATBOT BUTTON */}
                         <button 
                             onClick={navigateToChatbot} // Calls navigate("/chatbot")
                             className="
-                                px-8 
+                                px-6 
                                 py-3 
                                 bg-gradient-to-r 
                                 from-purple-600 
