@@ -3,30 +3,38 @@ import { useNavigate } from 'react-router-dom';
 
 const DashboardPage = () => {
     const [url, setUrl] = useState('');
-    const [file, setFile] = useState(null); // New state for file
+    const [file, setFile] = useState(null);
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState('');
     const navigate = useNavigate();
 
-    // --- Utility Function for Simulation ---
-    const simulateBackendWorkflow = async (source) => {
-        setLoading(true);
-        setStatus(`Attempting to scrape and process content from: ${source}`);
+    // Configuration - Ensure this matches your FastAPI port
+    const API_BASE_URL = "http://localhost:8000";
 
-        // 1. Simulate PDF Discovery
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        setStatus('Found 5 PDF documents on the webpage(s).');
+    // --- Real Backend Interaction ---
+    const triggerScrape = async (targetUrl) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/scrape`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ url: targetUrl }),
+            });
 
-        // 2. Simulate PDF Parsing and Knowledge Graph Generation
-        await new Promise(resolve => setTimeout(resolve, 2500));
-        setStatus('PDFs parsed. Knowledge Graph nodes and edges successfully generated and updated in the backend.');
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || 'Failed to connect to backend');
+            }
 
-        // 3. Final Confirmation
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        setStatus('Knowledge Graph Update Complete! New grant data is now available for matching.');
-        setLoading(false);
+            const data = await response.json();
+            return data; // Returns { status, message, files_queued }
+
+        } catch (error) {
+            console.error("Scrape Error:", error);
+            throw error;
+        }
     };
-    // ----------------------------------------
 
     const handleScrape = async (e) => {
         e.preventDefault();
@@ -35,8 +43,24 @@ const DashboardPage = () => {
             return;
         }
 
-        setUrl(''); // Clear the URL input
-        await simulateBackendWorkflow(url);
+        setLoading(true);
+        setStatus(`Sending request to backend for: ${url}...`);
+
+        try {
+            const data = await triggerScrape(url);
+            
+            if (data.status === 'success') {
+                setStatus(`✅ Success: ${data.message} (${data.files_queued.length} PDFs queued)`);
+            } else {
+                setStatus(`⚠️ Warning: ${data.message}`);
+            }
+            
+            setUrl(''); // Clear input on success
+        } catch (error) {
+            setStatus(`❌ Error: ${error.message}`);
+        } finally {
+            setLoading(false);
+        }
     };
 
     const handleFileScrape = async (e) => {
@@ -46,34 +70,56 @@ const DashboardPage = () => {
             return;
         }
 
-        // --- File Reading and Processing (Client-Side) ---
+        setLoading(true);
+        setStatus('Reading file...');
+
         const reader = new FileReader();
+        
         reader.onload = async (event) => {
             const fileContent = event.target.result;
+            // Split by newline and filter empty lines
             const urls = fileContent.split('\n')
                 .map(line => line.trim())
                 .filter(line => line.length > 0);
             
             if (urls.length === 0) {
                 alert("The file does not contain any URLs.");
-                setFile(null); // Clear file state
+                setLoading(false);
+                setFile(null);
                 return;
             }
 
-            // In a real application, you would send this 'urls' array to your backend.
-            const sourceDescription = `${urls.length} URLs from uploaded file`;
-            
-            // Clear the file state before starting the simulation
-            setFile(null); 
-            await simulateBackendWorkflow(sourceDescription);
+            setStatus(`Found ${urls.length} URLs. Starting batch processing...`);
+
+            let successCount = 0;
+            let failCount = 0;
+
+            // Iterate through URLs and call API for each
+            for (let i = 0; i < urls.length; i++) {
+                const currentUrl = urls[i];
+                setStatus(`Processing (${i + 1}/${urls.length}): ${currentUrl}`);
+
+                try {
+                    await triggerScrape(currentUrl);
+                    successCount++;
+                } catch (error) {
+                    console.error(`Failed to scrape ${currentUrl}`, error);
+                    failCount++;
+                }
+            }
+
+            setStatus(`🎉 Batch Complete! Successfully triggered ${successCount} jobs. Failed: ${failCount}. Check backend console for extraction progress.`);
+            setLoading(false);
+            setFile(null);
         };
         
         reader.onerror = () => {
             alert('Error reading file.');
+            setLoading(false);
             setFile(null);
         };
         
-        reader.readAsText(file); // Start reading the file
+        reader.readAsText(file);
     };
 
     return (
@@ -112,7 +158,7 @@ const DashboardPage = () => {
                                 placeholder="https://example-government-grants.in/scheme-details"
                                 required
                                 className="w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-red-500 focus:ring-red-500 transition duration-300"
-                                disabled={loading || !!file} // Disable if loading or a file is selected
+                                disabled={loading || !!file} 
                             />
                         </div>
                         <button
@@ -124,10 +170,13 @@ const DashboardPage = () => {
                                     : 'bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 shadow-lg shadow-red-500/30'
                             }`}
                         >
-                            {loading ? (
+                            {loading && !file ? (
                                 <>
-                                    <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">...</svg> 
-                                    <span>Processing... (Generating KG)</span>
+                                    <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <span>Initiating Backend Pipeline...</span>
                                 </>
                             ) : (
                                 <>
@@ -154,16 +203,16 @@ const DashboardPage = () => {
                             <input
                                 id="file-upload"
                                 type="file"
-                                accept=".txt" // Only accept .txt files
+                                accept=".txt"
                                 onChange={(e) => {
                                     setFile(e.target.files[0] || null);
-                                    setUrl(''); // Ensure URL field is cleared when file is selected
+                                    setUrl(''); 
                                 }}
                                 className="w-full p-3 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-cyan-50 file:text-cyan-700 hover:file:bg-cyan-100 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-red-500 focus:ring-red-500 transition duration-300"
-                                disabled={loading || !!url} // Disable if loading or URL is entered
+                                disabled={loading || !!url} 
                             />
                             {file && (
-                                <p className="mt-2 text-sm text-neutral-400">Selected file: **{file.name}**</p>
+                                <p className="mt-2 text-sm text-neutral-400">Selected file: <strong>{file.name}</strong></p>
                             )}
                         </div>
                         <button
@@ -175,10 +224,13 @@ const DashboardPage = () => {
                                     : 'bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 shadow-lg shadow-red-500/30'
                             }`}
                         >
-                            {loading ? (
+                            {loading && file ? (
                                 <>
-                                    <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">...</svg> 
-                                    <span>Processing... (Generating KG)</span>
+                                    <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <span>Processing Batch...</span>
                                 </>
                             ) : (
                                 <>
@@ -192,8 +244,14 @@ const DashboardPage = () => {
                     
                     {/* Status Log */}
                     {status && (
-                        <div className={`mt-6 p-4 rounded-lg text-sm ${loading ? 'bg-blue-900/50 text-cyan-300' : 'bg-green-900/50 text-green-300'}`}>
-                            **Current Status:** {status}
+                        <div className={`mt-6 p-4 rounded-lg text-sm border ${
+                            status.includes('Error') || status.includes('Failed') 
+                                ? 'bg-red-900/50 text-red-200 border-red-800' 
+                                : status.includes('Warning') 
+                                    ? 'bg-yellow-900/50 text-yellow-200 border-yellow-800'
+                                    : 'bg-green-900/50 text-green-300 border-green-800'
+                        }`}>
+                            <strong>Status:</strong> {status}
                         </div>
                     )}
                 </div>
