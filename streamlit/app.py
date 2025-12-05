@@ -9,11 +9,12 @@ import json
 BASE_URL = "http://localhost:8000"
 CHAT_URL = f"{BASE_URL}/chat"
 SCRAPE_URL = f"{BASE_URL}/scrape"
+QA_URL = f"{BASE_URL}/grant-qa"
 
 # Set page configuration
 st.set_page_config(
     page_title="DeepSeek Grant Assistant",
-    page_icon="🤖",
+    page_icon="⚡",
     layout="wide"
 )
 
@@ -24,128 +25,137 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # =========================================================
-# SIDEBAR: KNOWLEDGE BUILDER & SETTINGS
+# SIDEBAR: SETTINGS & TOOLS
 # =========================================================
 with st.sidebar:
-    st.header("🧠 Knowledge Base Builder")
-    st.markdown("Add new government schemes to the Neo4j Graph.")
+    st.title("⚙️ Control Panel")
     
-    # URL Input for Scraping
-    scrape_url_input = st.text_input("Target URL", value="https://mnre.gov.in/en/policies-and-regulations/schemes-and-guidelines/schemes/")
+    # --- MODE SELECTION ---
+    st.subheader("Mode")
+    chat_mode = st.radio(
+        "Select Interaction Type:",
+        ["General Agent", "Specific Grant Q&A"],
+        captions=["Graph-based reasoning", "Deep dive into one document"]
+    )
+    
+    # --- GRANT ID INPUT (Only for Q&A Mode) ---
+    target_grant_id = None
+    if chat_mode == "Specific Grant Q&A":
+        st.info("Enter the ID of the grant you want to analyze (e.g., from Neo4j).")
+        target_grant_id = st.text_input("Target Grant ID", placeholder="GRANT_xxxx")
+    
+    st.divider()
+
+    # --- KNOWLEDGE BUILDER ---
+    st.subheader("🧠 Knowledge Builder")
+    scrape_url_input = st.text_input("Scrape URL", value="https://mnre.gov.in/en/policies-and-regulations/schemes-and-guidelines/schemes/")
     
     if st.button("🚀 Start Extraction Pipeline"):
         with st.status("Running Pipeline...", expanded=True) as status:
             try:
                 st.write("📡 Connecting to Scraper...")
                 payload = {"url": scrape_url_input}
-                response = requests.post(SCRAPE_URL, json=payload, timeout=120) # Long timeout for scraping
+                response = requests.post(SCRAPE_URL, json=payload, timeout=120)
                 
                 if response.status_code == 200:
                     data = response.json()
                     status.update(label="Pipeline Started!", state="complete", expanded=False)
-                    
                     st.success(f"✅ {data.get('message')}")
                     
-                    # Show queued files if available
                     files = data.get("files_queued", [])
                     if files:
                         st.markdown("**Queued for AI Analysis:**")
                         for f in files:
                             st.code(f, language="text")
-                        st.info("Files are being processed in the background. You can start chatting about them now!")
                     else:
-                        st.warning("Scraper finished, but no PDF files were found.")
-                        
+                        st.warning("No PDFs found.")
                 else:
                     status.update(label="Failed", state="error")
                     st.error(f"Backend Error: {response.text}")
-                    
-            except requests.exceptions.ConnectionError:
-                status.update(label="Connection Error", state="error")
-                st.error("Could not connect to backend.")
             except Exception as e:
                 status.update(label="Error", state="error")
-                st.error(f"An unexpected error occurred: {str(e)}")
+                st.error(f"Error: {str(e)}")
 
     st.divider()
-
-    # System Utilities
-    st.header("System")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Check Health"):
-            try:
-                res = requests.get(BASE_URL, timeout=5)
-                if res.status_code != 404: # Basic connectivity check
-                    st.toast("✅ Backend Online")
-                else:
-                    st.toast("✅ Backend Reachable")
-            except:
-                st.toast("❌ Backend Offline")
-
-    with col2:
-        if st.button("Clear Chat"):
-            st.session_state.messages = []
-            st.rerun()
+    if st.button("Clear Chat History"):
+        st.session_state.messages = []
+        st.rerun()
 
 # =========================================================
 # MAIN CHAT INTERFACE
 # =========================================================
 st.title("⚡ Energy Transition Grant Assistant")
-st.markdown("""
-This AI Agent helps SMEs find grants. 
-* **Chat:** Ask questions about eligibility.
-* **Scrape:** Use the sidebar to ingest new government scheme URLs.
-""")
+
+if chat_mode == "General Agent":
+    st.caption("🤖 **Mode:** General Agent (Can use tools, check inventory, logic)")
+else:
+    st.caption(f"📄 **Mode:** RAG Q&A (Restricted to Grant ID: `{target_grant_id if target_grant_id else 'None'}`)")
+
 st.divider()
 
-# 1. Display existing chat history
+# 1. Display Chat History
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# 2. Capture user input
-if prompt := st.chat_input("E.g., 'Do I qualify for solar pump subsidies?'"):
+# 2. Capture User Input
+if prompt := st.chat_input("Ask a question..."):
     # Add user message to history
     st.session_state.messages.append({"role": "user", "content": prompt})
-    
-    # Display user message immediately
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 3. Generate response from API
+    # 3. Generate Response
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         message_placeholder.markdown("Thinking...")
 
         try:
-            # Call the FastAPI backend
-            payload = {
-                "message": prompt,
-                "thread_id": "streamlit_user_1" # Consistent ID for memory
-            }
-            response = requests.post(CHAT_URL, json=payload, timeout=60)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Check if it's a normal response or an approval request (HITL)
-                if data.get("status") == "requires_approval":
-                     tool_call = data.get("tool_call")
-                     ai_response = f"**Approval Needed:** I want to run `{tool_call['name']}` with these arguments:\n```json\n{tool_call['args']}\n```"
-                     # Note: Full HITL UI requires more complex state management, 
-                     # but this notifies the user for now.
-                else:
-                    ai_response = data.get("response", "No response received.")
+            # --- PATH A: SPECIFIC GRANT Q&A (RAG) ---
+            if chat_mode == "Specific Grant Q&A":
+                if not target_grant_id:
+                    error_msg = "⚠️ Please enter a **Grant ID** in the sidebar to use Q&A mode."
+                    message_placeholder.error(error_msg)
+                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                    st.stop()
 
-                message_placeholder.markdown(ai_response)
+                payload = {"grant_id": target_grant_id, "question": prompt}
+                response = requests.post(QA_URL, json=payload, timeout=60)
                 
-                # Add assistant response to history
-                st.session_state.messages.append({"role": "assistant", "content": ai_response})
+                if response.status_code == 200:
+                    data = response.json()
+                    answer = data.get("answer", "No answer found.")
+                    sources = data.get("sources", [])
+                    
+                    # Format output with sources
+                    final_response = f"{answer}\n\n---\n**Sources:**\n" + "\n".join([f"- `{s}`" for s in sources])
+                    message_placeholder.markdown(final_response)
+                    st.session_state.messages.append({"role": "assistant", "content": final_response})
+                else:
+                    message_placeholder.error(f"RAG Error: {response.text}")
+
+            # --- PATH B: GENERAL AGENT (LANGGRAPH) ---
             else:
-                error_msg = f"Error {response.status_code}: {response.text}"
-                message_placeholder.error(error_msg)
-        
+                payload = {
+                    "message": prompt,
+                    "thread_id": "streamlit_user_1"
+                }
+                response = requests.post(CHAT_URL, json=payload, timeout=60)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if data.get("status") == "requires_approval":
+                         tool_call = data.get("tool_call")
+                         ai_response = f"**Approval Needed:** I want to run `{tool_call['name']}` with args:\n```json\n{tool_call['args']}\n```"
+                    else:
+                        ai_response = data.get("response", "No response received.")
+
+                    message_placeholder.markdown(ai_response)
+                    st.session_state.messages.append({"role": "assistant", "content": ai_response})
+                else:
+                    message_placeholder.error(f"Agent Error: {response.text}")
+
         except requests.exceptions.ConnectionError:
             message_placeholder.error("Failed to connect to backend. Is the FastAPI server running?")
         except Exception as e:

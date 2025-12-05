@@ -5,6 +5,7 @@ import httpx
 import requests
 import random
 import re
+import uuid
 import time
 from urllib.parse import urljoin
 from typing import List, Optional, Annotated
@@ -91,6 +92,7 @@ llm = ChatOpenAI(
 # =========================================================
 class GrantSchema(BaseModel):
     """Structured extraction schema for Government Grants."""
+    id: Optional[str] = Field(description="Unique Identifier for the grant", default=None)
     name: str = Field(description="Official name of the grant or scheme")
     funding_type: str = Field(description="Type of funding: 'Subsidy', 'Loan', 'Grant', or 'Equity'")
     max_value: Optional[str] = Field(description="Maximum monetary value (e.g., '50 Lakhs')")
@@ -276,9 +278,27 @@ async def extract_and_store(file_path: str):
             # --- CHECK 4: VALIDATE SCHEMA ---
             validated_data = GrantSchema(**data)
 
+
+            grant_id = f"GRANT_{uuid.uuid4().hex[:8]}"
+            validated_data.id = grant_id
+
             # 4. Success - Store in Neo4j
             print(f"🧠 AGENT: Successfully Extracted: {validated_data.name}")
+            print(f"🆔 Grant ID: {grant_id}")
             neo4j_handler.ingest_grant(validated_data.model_dump())
+            
+            print(f"📚 VECTOR: Chunking and embedding text for {grant_id}...")
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            
+            # Add metadata to every chunk
+            for doc in docs:
+                doc.metadata = {"grant_id": grant_id, "source": file_path, "name": validated_data.name}
+                
+            splits = text_splitter.split_documents(docs)
+            vectorstore = get_vectorstore()
+            vectorstore.add_documents(splits)
+            print(f"✅ VECTOR: Added {len(splits)} chunks to ChromaDB.")
+            
             return 
 
         except json.JSONDecodeError:
@@ -442,7 +462,7 @@ def get_vectorstore():
         embedding_function=OpenAIEmbeddings(
             base_url="https://genailab.tcs.in",
             api_key=os.getenv("OPENAI_API_KEY"),
-            model="azure_ai/genailab-maas-text-embedding-3-small",
+            model="azure/genailab-maas-text-embedding-3-large",
             http_client=client 
         )
     )
@@ -616,6 +636,11 @@ class ChatRequest(BaseModel):
 class ScrapeRequest(BaseModel):
     url: str
 
+class GrantQARequest(BaseModel):
+    grant_id: str
+    question: str
+    thread_id: str = "default"
+
 
 # --- THE AUTOMATED ENDPOINT ---
 @app.post("/scrape")
@@ -722,6 +747,60 @@ async def ingest_document(file: UploadFile = File(...)):
         if os.path.exists(file_path):
             os.remove(file_path)
 
+@app.post("/grant-qa")
+async def grant_qa_endpoint(request: GrantQARequest):
+    """
+    Specific Q&A on a single Grant using RAG with Metadata Filtering.
+    """
+    print(f"❓ RAG: Question on Grant {request.grant_id}: {request.question}")
+    
+    try:
+        vectorstore = get_vectorstore()
+        
+        # 1. Create Filtered Retriever
+        # This ensures we ONLY retrieve chunks belonging to this specific Grant ID
+        retriever = vectorstore.as_retriever(
+            search_kwargs={
+                "k": 5,
+                "filter": {"grant_id": request.grant_id} 
+            }
+        )
+        
+        # 2. Get Context
+        docs = retriever.invoke(request.question)
+        if not docs:
+            return {
+                "answer": "I couldn't find any specific details in the document for this grant. It might not have been processed correctly.",
+                "sources": []
+            }
+            
+        context_text = "\n\n".join([d.page_content for d in docs])
+        
+        # 3. Generate Answer
+        rag_prompt = f"""
+        You are a helpful assistant answering questions about a specific government grant.
+        Use the following context to answer the user's question.
+        If the answer is not in the context, say "I cannot find that information in the official document."
+        
+        Context:
+        {context_text}
+        
+        Question: 
+        {request.question}
+        """
+        
+        response = llm.invoke(rag_prompt)
+        
+        return {
+            "answer": response.content,
+            "sources": [d.metadata.get("source", "unknown") for d in docs]
+        }
+
+    except Exception as e:
+        print(f"❌ RAG ERROR: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
+    if not os.path.exists(SCRAPE_DIR): os.makedirs(SCRAPE_DIR)
     uvicorn.run(app, host="0.0.0.0", port=8000)
