@@ -8,7 +8,7 @@ import re
 import uuid
 import time
 from urllib.parse import urljoin
-from typing import List, Optional, Annotated
+from typing import List, Optional, Annotated, Literal, Dict
 from typing_extensions import TypedDict
 from contextlib import asynccontextmanager
 import json
@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 # FastAPI & Pydantic
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Database
 from neo4j import GraphDatabase
@@ -80,8 +80,9 @@ client = httpx.Client(verify=False)
 
 llm = ChatOpenAI(
     base_url="https://genailab.tcs.in",
-    model="azure_ai/genailab-maas-DeepSeek-V3-0324",
+    model="azure/genailab-maas-gpt-4o",
     api_key=os.getenv("OPENAI_API_KEY"),
+    http_async_client=httpx.AsyncClient(verify=False),
     http_client=client,
     temperature=0
 )
@@ -93,7 +94,9 @@ llm = ChatOpenAI(
 class GrantSchema(BaseModel):
     """Structured extraction schema for Government Grants."""
     id: Optional[str] = Field(description="Unique Identifier for the grant", default=None)
+    filename: Optional[str] = Field(description="Name of the source PDF file", default=None)    
     name: str = Field(description="Official name of the grant or scheme")
+    description: str = Field(description="Brief summary.", default="No description provided.")
     funding_type: str = Field(description="Type of funding: 'Subsidy', 'Loan', 'Grant', or 'Equity'")
     max_value: Optional[str] = Field(description="Maximum monetary value (e.g., '50 Lakhs')")
     max_subsidy: Optional[str] = Field(description="Percentage or amount of subsidy")
@@ -105,6 +108,29 @@ class GrantSchema(BaseModel):
     criterion_1: str = Field(description="Primary mandatory eligibility criterion")
     criterion_2: str = Field(description="Secondary mandatory eligibility criterion")
 
+    # FIX 2: Auto-convert single strings to lists (e.g. "India" -> ["India"])
+    @field_validator('verticals', 'tech_focus', 'size_eligibility', 'geo_filter', 'country', mode='before')
+    @classmethod
+    def convert_string_to_list(cls, v):
+        if isinstance(v, str):
+            # Split by comma if it looks like a CSV string, otherwise wrap in list
+            if "," in v:
+                return [item.strip() for item in v.split(",")]
+            return [v]
+        return v
+
+
+class SMEProfile(BaseModel):
+    """SME profile with validation"""
+    sme_size: Literal['Micro', 'Small', 'Medium']
+    udyam_status: bool
+    sector_category: str # Relaxed from Literal to allow flexibility
+    financial_performance: str 
+    location_state: str 
+    project_value: float 
+    project_need_description: str = Field(description="User's description of what they need money for")
+
+
 # =========================================================
 # 3️⃣ NEO4J HANDLER (Refactored for Direct JSON Injection)
 # =========================================================
@@ -115,17 +141,28 @@ class Neo4jHandler:
     def close(self):
         self.driver.close()
 
+    def ensure_indexes(self):
+        """Creates the Fulltext Index required for search."""
+        query = "CREATE FULLTEXT INDEX grant_keywords IF NOT EXISTS FOR (n:Grant) ON EACH [n.name, n.description]"
+        with self.driver.session() as session:
+            try:
+                session.run(query)
+                print("✅ NEO4J: Fulltext Index 'grant_keywords' verified/created.")
+            except Exception as e:
+                print(f"⚠️ NEO4J Index Error: {e}")
+
     def ingest_grant(self, grant_data: dict):
         """Ingests a single clean grant object into Neo4j."""
         
         # Generate an ID if one doesn't exist (using Name hash or random)
-        grant_id = f"GRANT_{random.randint(1000,9999)}"
-        grant_data['id'] = grant_id
+        if not grant_data.get('id'):
+            grant_data['id'] = f"GRANT_{random.randint(1000,9999)}"
         
         cypher_query = """
         WITH $data AS g
         MERGE (grant:Grant {id: g.id})
         SET grant.name = g.name,
+        grant.filename = g.filename, 
             grant.funding_type = g.funding_type,
             grant.max_value = g.max_value,
             grant.max_subsidy = g.max_subsidy
@@ -170,8 +207,7 @@ class Neo4jHandler:
         
         with self.driver.session() as session:
             session.run(cypher_query, data=grant_data)
-            print(f"✅ NEO4J: Successfully ingested grant '{grant_data['name']}'")
-
+            print(f"✅ NEO4J: Ingested '{grant_data['name']}' ({grant_data['filename']})")
 # Initialize Handler
 neo4j_handler = Neo4jHandler(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
 
@@ -181,7 +217,8 @@ neo4j_handler = Neo4jHandler(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
 
 
 async def extract_and_store(file_path: str):
-    print(f"🕵️ AGENT: Reading {file_path} for extraction...")
+    pdf_filename = os.path.basename(file_path) 
+    print(f"🕵️ AGENT: Processing {pdf_filename}...")
     
     # --- FIX 1: Robust PDF Loading ---
     try:
@@ -206,48 +243,51 @@ async def extract_and_store(file_path: str):
     # 2. Define the Prompt
     prompt = f"""
     Role
-    You are an expert Data Extraction AI specialized in analyzing government documents.
+You are an expert Data Extraction AI specialized in analyzing government documents, grant schemes, and funding opportunity announcements.
 
-    Task
-    Analyze the provided document text and extract specific structured data into a JSON object.
+Task
+Analyze the provided document text and extract specific structured data into a JSON object.
 
-    Important: If the document contains some of the required data but is missing a few fields, add appropriate data by yourself based on context.
+Important: If the document contains some of the required data but is missing a few fields, add appropriate data by yourself based on context, logical inference, or general knowledge. Do not leave fields empty if they can be reasonably populated.
 
-    Critical Instruction: Relevance Check
-    The document IS RELEVANT if it describes:
-    * A government grant, scheme, or subsidy.
-    * A loan program or equity funding opportunity.
-    * An incentive program (e.g., PLI).
+Critical Instruction: Relevance Check
+Before extracting any data, evaluate if the document is relevant.
 
-    The document is IRRELEVANT if it is:
-    * A receipt, invoice, or personal letter unrelated to funding.
-    * A general news article without specific scheme details.
-    * Completely empty or unintelligible.
+The document IS RELEVANT if it describes:
+* A government grant, scheme, or subsidy.
+* A loan program or equity funding opportunity.
+* An incentive program (e.g., PLI - Production Linked Incentive).
 
-    IF THE DOCUMENT IS IRRELEVANT:
-    Return strictly the string: "abort"
+The document is IRRELEVANT if it is:
+* A receipt, invoice, or personal letter unrelated to funding.
+* A general news article without specific scheme details.
+* Completely empty or unintelligible.
 
-    IF THE DOCUMENT IS RELEVANT:
-    Return a valid JSON object matching this schema:
-    {{
-        "name": "string",
-        "funding_type": "string",
-        "max_value": "string or null",
-        "max_subsidy": "string or null",
-        "verticals": ["string"],
-        "tech_focus": ["string"],
-        "size_eligibility": ["string"],
-        "geo_filter": ["string"],
-        "country": ["string"],
-        "criterion_1": "string",
-        "criterion_2": "string"
-    }}
+IF THE DOCUMENT IS IRRELEVANT:
+* Return strictly the string: "abort"
+* Do not return JSON. Do not return any other text.
 
-    Output Format:
-    Return ONLY valid JSON. Do not include "Here is the JSON" or markdown formatting.
+IF THE DOCUMENT IS RELEVANT:
+1. Extract the fields defined below and return a valid JSON object.
+2. Extraction Schema
+3. name (str): Official name of the grant or scheme.
+4. funding_type (str): One of ['Subsidy', 'Loan', 'Grant', 'Equity']. Note: 'Production Linked Incentives' (PLI) count as 'Subsidy'.
+5. max_value (str | null): Maximum monetary value/outlay (e.g., '19,500 Crore', '50 Lakhs').
+6. max_subsidy (str | null): Specific subsidy amount or percentage per beneficiary (e.g., 'Rs 2.20 per Watt peak').
+7. verticals (List[str]): Target industries (e.g., ['Solar', 'Renewable Energy', 'Textiles']).
+8. tech_focus (List[str]): Specific technologies mentioned (e.g., ['Polysilicon', 'Wafer', 'Cells']).
+9. size_eligibility (List[str]): Target business sizes (e.g., ['Large', 'Micro', 'Small']). Infer 'Large' if the scheme requires GW scale or massive capex.
+10. geo_filter (List[str]): Specific applicable states/regions. Use ['Pan-India'] if applicable to the whole country.
+11. country (List[str]): Countries applicable. Infer 'India' if INR currency or Indian ministries are mentioned.
+12. criterion_1 (str): Primary mandatory eligibility criterion (e.g., capacity requirements).
+13. criterion_2 (str): Secondary mandatory eligibility criterion.
 
-    Input Document Text:
-    {full_text}
+Output Format
+* Return ONLY valid JSON or the string "abort".
+* No markdown formatting (like ```json).
+
+Input Document Text
+{full_text}
     """
 
     # 3. Retry Loop
@@ -281,6 +321,7 @@ async def extract_and_store(file_path: str):
 
             grant_id = f"GRANT_{uuid.uuid4().hex[:8]}"
             validated_data.id = grant_id
+            validated_data.filename = pdf_filename
 
             # 4. Success - Store in Neo4j
             print(f"🧠 AGENT: Successfully Extracted: {validated_data.name}")
@@ -292,7 +333,12 @@ async def extract_and_store(file_path: str):
             
             # Add metadata to every chunk
             for doc in docs:
-                doc.metadata = {"grant_id": grant_id, "source": file_path, "name": validated_data.name}
+                doc.metadata = {
+                    "grant_id": grant_id, 
+                    "source": file_path, 
+                    "filename": pdf_filename,
+                    "name": validated_data.name
+                    }
                 
             splits = text_splitter.split_documents(docs)
             vectorstore = get_vectorstore()
@@ -414,6 +460,100 @@ def perform_scraping(url: str, output_folder: str):
         raise e
 
     return downloaded_files
+
+
+# =========================================================
+# 7️⃣ MATCHING LOGIC (FIXED AGGREGATION)
+# =========================================================
+def find_matching_grants(sme: SMEProfile) -> List[Dict]:
+    """
+    Robust Semantic Search with Fixed Aggregation Logic.
+    """
+    session = neo4j_handler.driver.session()
+    
+    # 1. Sanitize Input
+    clean_desc = re.sub(r'[^a-zA-Z0-9\s]', ' ', sme.project_need_description)
+    words = clean_desc.split()
+    if not words:
+        keywords = "generic~"
+    else:
+        keywords = " OR ".join([f"{w}~" for w in words])
+    
+    # 2. Cypher Query with Step-by-Step Aggregation
+    query = f"""
+    CALL db.index.fulltext.queryNodes("grant_keywords", "{keywords}") 
+    YIELD node AS g, score
+    
+    // --- Step A: Calculate Size Score ---
+    // We use max() to collapse multiple size matches into one number per grant
+    OPTIONAL MATCH (g)-[:ELIGIBLE_FOR_SIZE]->(s)
+    WITH g, score, 
+         max(CASE WHEN s.name = '{sme.sme_size}' THEN 2.0 ELSE 0.5 END) AS size_score
+    
+    // --- Step B: Calculate Sector Score ---
+    // We use max() to find the BEST sector match among all verticals the grant targets
+    OPTIONAL MATCH (g)-[:TARGETS_VERTICAL]->(v)
+    WITH g, score, size_score,
+         max(CASE 
+            WHEN v.name CONTAINS '{sme.sector_category}' THEN 3.0 
+            WHEN v.name STARTS WITH 'All' THEN 1.0
+            ELSE 0.5 
+         END) AS sector_score
+         
+    // --- Step C: Final Calculation ---
+    // Now all variables (score, size_score, sector_score) are unique per 'g'
+    WITH g, 
+         (score * 5) + coalesce(size_score, 0.5) + coalesce(sector_score, 0.5) AS final_score
+    
+    // --- Step D: Return Data ---
+    RETURN {{
+        id: g.id,
+        title: g.name,
+        funding_type: g.funding_type,
+        max_value: g.max_value,
+        description: g.description,
+        filename: g.filename,
+        match_score: final_score,
+        target_verticals: [(g)-[:TARGETS_VERTICAL]->(v) | v.name],
+        eligibility_criteria: [(g)-[:REQUIRES_CRITERION]->(c) | {{type: c.type, description: c.description}}]
+    }} AS grant_data
+    ORDER BY final_score DESC
+    LIMIT 5
+    """
+    
+    try:
+        print(f"🔍 MATCHING: Searching for keywords: {keywords[:50]}...")
+        result = session.run(query)
+        matches = [record["grant_data"] for record in result]
+        
+        if not matches:
+            print("⚠️ No matches found.")
+            
+        return matches
+    except Exception as e:
+        print(f"❌ Match Error: {e}")
+        return []
+    finally:
+        session.close()
+
+async def generate_application_checklist(grant_title: str, sme: SMEProfile):
+    prompt = f"""
+    Create a practical application checklist for grant: "{grant_title}".
+    Applicant Profile: {sme.sme_size} {sme.sector_category} company needing {sme.project_need_description}.
+    
+    Provide:
+    1. Pre-qualification check
+    2. Required documents
+    3. Application steps
+    Keep it concise.
+    """
+    response = await llm.ainvoke(prompt)
+    return response.content
+
+# =========================================================
+# 8️⃣ FASTAPI APP & ENDPOINTS
+# =========================================================
+
 
 # =========================================================
 # 3️⃣ MOCK DATA LAYER (Local Knowledge Base)
@@ -578,9 +718,12 @@ def create_agent_graph(tools_list):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("\n🔄 LIFESPAN: Initializing MCP Client...")
-    
-    if not os.path.exists(DB_DIR):
-        os.makedirs(DB_DIR)
+
+    neo4j_handler.ensure_indexes()
+    if not os.path.exists(DB_DIR): os.makedirs(DB_DIR)
+
+    yield
+    print("🛑 Shutdown")
 
     mcp_client = MultiServerMCPClient({
         "finance": {
@@ -613,6 +756,8 @@ async def lifespan(app: FastAPI):
     
     print("🛑 LIFESPAN: Application shutdown.")
 
+
+
 # =========================================================
 # 7️⃣ FASTAPI APP
 # =========================================================
@@ -640,6 +785,30 @@ class GrantQARequest(BaseModel):
     grant_id: str
     question: str
     thread_id: str = "default"
+
+class MatchRequest(BaseModel):
+    sme_profile: SMEProfile
+
+@app.post("/match-grants")
+async def match_grants_endpoint(request: MatchRequest):
+    """
+    Accepts SME Profile, finds matches in Neo4j, and generates a checklist for the top match.
+    """
+    sme = request.sme_profile
+    matches = find_matching_grants(sme)
+    
+    if not matches:
+        return {"status": "no_match", "matches": [], "checklist": None}
+    
+    # Generate checklist for the top match
+    top_grant_title = matches[0]['title']
+    checklist = await generate_application_checklist(top_grant_title, sme)
+    
+    return {
+        "status": "success",
+        "matches": matches,
+        "top_match_checklist": checklist
+    }
 
 
 # --- THE AUTOMATED ENDPOINT ---
@@ -790,11 +959,17 @@ async def grant_qa_endpoint(request: GrantQARequest):
         """
         
         response = llm.invoke(rag_prompt)
-        
-        return {
-            "answer": response.content,
-            "sources": [d.metadata.get("source", "unknown") for d in docs]
-        }
+
+        # Return distinct filenames instead of full source paths
+        seen_files = set()
+        sources = []
+        for d in docs:
+            fname = d.metadata.get("filename", "unknown.pdf") # <--- GET FILENAME
+            if fname not in seen_files:
+                sources.append(fname)
+                seen_files.add(fname)
+                
+        return {"answer": response.content, "sources": sources}
 
     except Exception as e:
         print(f"❌ RAG ERROR: {e}")
