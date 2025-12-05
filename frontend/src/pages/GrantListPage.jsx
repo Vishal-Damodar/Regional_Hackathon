@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import GrantDetailModal from './GrantDetailModal'; // Ensure this path is correct
 
 const DUMMY_GRANTS = [
     {
@@ -9,6 +10,9 @@ const DUMMY_GRANTS = [
         amount: "Up to ₹10 Lakhs",
         sector: "Manufacturing, Service",
         deadline: "31st Dec 2025",
+        description: "A central government scheme to promote solar energy adoption by offering direct subsidies on rooftop installations for commercial and industrial users.",
+        eligibility: ["Must be an MSME", "Minimum 10kW system size", "Operational for at least 3 years"],
+        document_url: "grant_document_1.pdf", // Placeholder URL
     },
     {
         id: 2,
@@ -17,6 +21,9 @@ const DUMMY_GRANTS = [
         amount: "Up to ₹50 Lakhs",
         sector: "Manufacturing",
         deadline: "30th Nov 2025",
+        description: "Financial assistance for replacing old machinery with modern, energy-efficient equipment to reduce carbon footprint and operating costs.",
+        eligibility: ["Manufacturing sector only", "Detailed energy audit required", "Project must achieve at least 15% energy savings"],
+        document_url: "grant_document_2.pdf", // Placeholder URL
     },
     {
         id: 3,
@@ -25,6 +32,9 @@ const DUMMY_GRANTS = [
         amount: "Up to ₹25 Lakhs",
         sector: "Service, Trading",
         deadline: "15th Jan 2026",
+        description: "A grant aimed at service and trading businesses for adopting environmentally friendly technologies like waste management systems or electric delivery vehicles.",
+        eligibility: ["Service or Trading MSMEs", "SME rating of B+ or higher", "Technology must be certified green"],
+        document_url: "grant_document_3.pdf", // Placeholder URL
     },
     {
         id: 4,
@@ -33,6 +43,9 @@ const DUMMY_GRANTS = [
         amount: "Up to ₹5 Crores",
         sector: "Manufacturing",
         deadline: "Open",
+        description: "Incentive provided by the state government for establishing industrial units that utilize geothermal energy sources for heating or power generation.",
+        eligibility: ["Project located in Telangana", "Minimum capital investment of ₹25 Crores", "Approval from State Energy Authority"],
+        document_url: "grant_document_4.pdf", // Placeholder URL
     },
 ];
 
@@ -41,11 +54,21 @@ const GrantListPage = () => {
     const location = useLocation();
     const navigate = useNavigate();
     const { formData } = location.state || { formData: {} };
+    
+    // State to manage the modal
+    const [selectedGrant, setSelectedGrant] = useState(null);
+    const [isModalOpen, setIsModalOpen] = useState(false);
 
-    // Placeholder function for clicking a grant (simulates going to details page)
+    // Function to handle the grant click and open the modal
     const handleGrantClick = (grant) => {
-        alert(`Navigating to details for: ${grant.title}`);
-        // In a real app, you would navigate( /grants/${grant.id} )
+        setSelectedGrant(grant);
+        setIsModalOpen(true);
+    };
+    
+    // Function to close the modal
+    const handleCloseModal = () => {
+        setIsModalOpen(false);
+        setSelectedGrant(null);
     };
 
     return (
@@ -102,6 +125,14 @@ const GrantListPage = () => {
                     ))}
                 </div>
             </div>
+            
+            {/* The Modal Component */}
+            {isModalOpen && selectedGrant && (
+                <GrantDetailModal 
+                    grant={selectedGrant} 
+                    onClose={handleCloseModal} 
+                />
+            )}
         </div>
     );
 };

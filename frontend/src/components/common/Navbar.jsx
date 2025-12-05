@@ -32,9 +32,9 @@ const Navbar = () => {
           <Link to="/" className="text-neutral-300 hover:text-cyan-400 transition-colors duration-200 text-sm md:text-base">
             Home
           </Link>
-          <Link to="/chatbot" className="text-neutral-300 hover:text-cyan-400 transition-colors duration-200 text-sm md:text-base">
+          {/* <Link to="/chatbot" className="text-neutral-300 hover:text-cyan-400 transition-colors duration-200 text-sm md:text-base">
             Chatbot
-          </Link>
+          </Link> */}
 
           {/* 🔑 NEW: Admin Login Button in NavBar */}
           <Link 
