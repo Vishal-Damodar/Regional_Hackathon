@@ -8,7 +8,8 @@ import json
 # The URL where your FastAPI backend is running
 BASE_URL = "http://localhost:8000"
 CHAT_URL = f"{BASE_URL}/chat"
-SCRAPE_URL = f"{BASE_URL}/scrape"
+# CHANGED: We now point to the /crawl endpoint for the main pipeline
+CRAWL_URL = f"{BASE_URL}/crawl" 
 QA_URL = f"{BASE_URL}/grant-qa"
 MATCH_URL = f"{BASE_URL}/match-grants"
 
@@ -50,32 +51,42 @@ with st.sidebar:
         target_grant_id = st.text_input("Target Grant ID", placeholder="GRANT_xxxx")
         st.divider()
 
-    # --- KNOWLEDGE BUILDER (Always Visible) ---
-    with st.expander("🧠 Knowledge Base Builder"):
-        scrape_url_input = st.text_input("Scrape URL", value="https://mnre.gov.in/en/policies-and-regulations/schemes-and-guidelines/schemes/")
+    # --- KNOWLEDGE BUILDER (Crawler Integrated) ---
+    with st.expander("🧠 Knowledge Base Builder", expanded=True):
+        st.caption("Enter a root URL. The AI will crawl links to find PDFs.")
+        scrape_url_input = st.text_input("Root URL", value="https://ireda.in/cpsu-scheme")
         
-        if st.button("🚀 Start Pipeline"):
-            with st.status("Running Pipeline...", expanded=True) as status:
+        if st.button("🚀 Start Crawler & Ingestion"):
+            with st.status("🕷️ Running Web Crawler...", expanded=True) as status:
                 try:
-                    st.write("📡 Connecting to Scraper...")
+                    st.write("📡 Initializing Spider...")
                     payload = {"url": scrape_url_input}
-                    response = requests.post(SCRAPE_URL, json=payload, timeout=120)
+                    
+                    # Increased timeout to 300s because crawling takes time
+                    response = requests.post(CRAWL_URL, json=payload, timeout=300)
                     
                     if response.status_code == 200:
                         data = response.json()
-                        status.update(label="Pipeline Started!", state="complete", expanded=False)
+                        status.update(label="Ingestion Pipeline Active!", state="complete", expanded=False)
                         st.success(f"✅ {data.get('message')}")
+                        
+                        # Display Stats
+                        pages = data.get("pages_found", [])
                         files = data.get("files_queued", [])
+                        
+                        col1, col2 = st.columns(2)
+                        col1.metric("Pages Scanned", len(pages))
+                        col2.metric("PDFs Queued", len(files))
+                        
                         if files:
-                            st.caption("Queued Files:")
-                            for f in files:
-                                st.code(f, language="text")
+                            st.caption("📄 Files currently being processed by AI:")
+                            st.code("\n".join(files), language="text")
                     else:
                         status.update(label="Failed", state="error")
-                        st.error(f"Error: {response.text}")
+                        st.error(f"Backend Error: {response.text}")
                 except Exception as e:
                     status.update(label="Error", state="error")
-                    st.error(f"Error: {str(e)}")
+                    st.error(f"Connection Error: {str(e)}")
 
     if st.button("Clear Chat / Reset"):
         st.session_state.messages = []
@@ -168,7 +179,7 @@ if app_mode == "🎯 Smart Grant Matcher":
                         st.caption(f"**Max:** {grant.get('max_value')}")
                         st.caption(f"🆔 `{grant.get('id')}`")
                         
-                        # --- NEW: Display Source File ---
+                        # Display Source File if available
                         if grant.get('filename'):
                             st.caption(f"📄 `{grant.get('filename')}`")
                     

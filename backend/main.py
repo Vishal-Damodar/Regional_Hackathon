@@ -12,10 +12,15 @@ from typing import List, Optional, Annotated, Literal, Dict
 from typing_extensions import TypedDict
 from contextlib import asynccontextmanager
 import json
+import subprocess
 from pydantic import ValidationError
 
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+
+# Scrapy Imports
+import scrapy
+from scrapy.crawler import CrawlerProcess
 
 # FastAPI & Pydantic
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
@@ -54,6 +59,93 @@ NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "KushalKuldipSuhas"
 DB_DIR = "./chroma_db"
 SCRAPE_DIR = "scraped_docs"
+CRAWL_OUTPUT_FILE = "crawler_results.json"
+
+
+# =========================================================
+# 2️⃣ SCRAPY SPIDER DEFINITION
+# =========================================================
+class IredaCrawlerSpider(scrapy.Spider):
+    """
+    A Scrapy Spider designed to crawl a scheme page and its linked pages (BFS).
+    """
+    name = 'ireda_crawler'
+    # Custom settings defined inside the class for encapsulation
+    custom_settings = {
+        'DEPTH_PRIORITY': 1,
+        'SCHEDULER_DISK_QUEUE': 'scrapy.squeues.PickleFifoDiskQueue',
+        'SCHEDULER_MEMORY_QUEUE': 'scrapy.squeues.FifoMemoryQueue',
+        'DEPTH_LIMIT': 1, # Crawl depth (Start page + 1 click deep)
+        'CLOSESPIDER_PAGECOUNT': 10, # Limit total pages to prevent infinite crawling
+        'LOG_LEVEL': 'INFO',
+        'REQUEST_FINGERPRINTER_IMPLEMENTATION': '2.7',
+        'DOWNLOAD_HANDLERS': {
+            'https': 'scrapy.core.downloader.handlers.http.HTTPDownloadHandler',
+        },
+    }
+
+    def __init__(self, start_url=None, *args, **kwargs):
+        super(IredaCrawlerSpider, self).__init__(*args, **kwargs)
+        self.start_urls = [start_url] if start_url else []
+        self.pdf_xpath = '//a[contains(@href, ".pdf")] | //*[contains(@onclick, "open_doc")]'
+        self.url_pattern_onclick = re.compile(r"open_doc\('([^']+)'\)")
+
+    def parse(self, response):
+        # 1. Extract PDFs
+        pdf_elements = response.xpath(self.pdf_xpath)
+        for element in pdf_elements:
+            pdf_url = None
+            
+            # Check JS links
+            onclick_content = element.xpath('@onclick').get()
+            if onclick_content:
+                match = self.url_pattern_onclick.search(onclick_content)
+                if match:
+                    pdf_url = response.urljoin(match.group(1))
+
+            # Check standard links
+            if not pdf_url:
+                href_content = element.xpath('@href').get()
+                if href_content and href_content.lower().endswith('.pdf'):
+                    pdf_url = response.urljoin(href_content)
+
+            if pdf_url:
+                yield {
+                    'source_url': response.url,
+                    'pdf_link': pdf_url
+                }
+
+        # 2. Follow Links (BFS)
+        # Only follow internal links to avoid crawling the whole internet
+        all_links = response.xpath('//a/@href').getall()
+        for href in all_links:
+            full_url = response.urljoin(href)
+            # Basic domain restriction logic
+            if response.url.split('/')[2] in full_url: 
+                yield response.follow(full_url, callback=self.parse)
+
+# =========================================================
+# 3️⃣ CRAWLER PROCESS WRAPPER
+# =========================================================
+def run_crawler_process(start_url: str, output_file: str):
+    """
+    Isolated function to run Scrapy in a separate process.
+    """
+    # Remove old results
+    if os.path.exists(output_file):
+        os.remove(output_file)
+
+    settings = {
+        'FEED_FORMAT': 'json',
+        'FEED_URI': output_file,
+        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    process = CrawlerProcess(settings)
+    process.crawl(IredaCrawlerSpider, start_url=start_url)
+    process.start() # Blocks here until crawling finishes
+
+    
 # =========================================================
 # 1️⃣ BYPASS SSL ERRORS GLOBALLY
 # =========================================================
@@ -163,9 +255,10 @@ class Neo4jHandler:
         MERGE (grant:Grant {id: g.id})
         SET grant.name = g.name,
         grant.filename = g.filename, 
-            grant.funding_type = g.funding_type,
-            grant.max_value = g.max_value,
-            grant.max_subsidy = g.max_subsidy
+        grant.description = g.description,
+        grant.funding_type = g.funding_type,
+        grant.max_value = g.max_value,
+        grant.max_subsidy = g.max_subsidy
         
         // Verticals
         FOREACH (v IN g.verticals | 
@@ -281,6 +374,7 @@ IF THE DOCUMENT IS RELEVANT:
 11. country (List[str]): Countries applicable. Infer 'India' if INR currency or Indian ministries are mentioned.
 12. criterion_1 (str): Primary mandatory eligibility criterion (e.g., capacity requirements).
 13. criterion_2 (str): Secondary mandatory eligibility criterion.
+14. description (str): Description of the grant or scheme.
 
 Output Format
 * Return ONLY valid JSON or the string "abort".
@@ -808,6 +902,64 @@ async def match_grants_endpoint(request: MatchRequest):
         "status": "success",
         "matches": matches,
         "top_match_checklist": checklist
+    }
+
+
+@app.post("/crawl")
+async def crawl_endpoint(request: ScrapeRequest, background_tasks: BackgroundTasks):
+    """
+    1. Runs Scrapy Spider to find URLs.
+    2. Extracts unique source URLs.
+    3. Runs Scrape + Extraction on each unique URL found.
+    """
+    print(f"🕷️ CRAWL REQUEST: {request.url}")
+    
+    # 1. Run Scrapy as Subprocess
+    try:
+        # NOTE: Assumes 'crawler_spider.py' is in the same folder
+        subprocess.run(
+            ["scrapy", "runspider", "crawler_spider.py", "-a", f"start_url={request.url}", "-O", "crawled_output.json"], 
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Crawler failed: {e}")
+
+    # 2. Process Output
+    if not os.path.exists("crawled_output.json"):
+        return {"status": "warning", "message": "Crawler finished but no output file found."}
+
+    with open("crawled_output.json", "r") as f:
+        try:
+            crawled_data = json.load(f)
+        except json.JSONDecodeError:
+            return {"status": "warning", "message": "Crawler output is empty."}
+
+    # 3. Extract Unique Source URLs (Pages that contain PDFs)
+    # The user asked to pass "source_url" to perform_scraping.
+    # We will also pass the direct PDF links if available to save time.
+    
+    unique_sources = list(set([item['source_url'] for item in crawled_data if 'source_url' in item]))
+    
+    print(f"✅ Found {len(unique_sources)} unique pages with PDFs.")
+    
+    files_queued = []
+    
+    # 4. Trigger Scraping for each Source URL
+    for source_url in unique_sources:
+        print(f"📥 Triggering Scrape for: {source_url}")
+        new_files = perform_scraping(source_url, SCRAPE_DIR)
+        
+        for f in new_files:
+            if f not in files_queued:
+                full_path = os.path.join(SCRAPE_DIR, f)
+                background_tasks.add_task(extract_and_store, full_path)
+                files_queued.append(f)
+
+    return {
+        "status": "success", 
+        "message": f"Crawled {len(unique_sources)} pages. Queued {len(files_queued)} PDFs for analysis.",
+        "pages_found": unique_sources,
+        "files_queued": files_queued
     }
 
 
