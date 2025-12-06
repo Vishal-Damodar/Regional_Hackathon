@@ -74,22 +74,22 @@ const GrantListPage = () => {
                         )) : <p>No filter data provided.</p>}
                     </div>
                 </div>
-{/* 
+ 
                 {/* AI Checklist Suggestion (If available from backend) */}
-                {checklist && (
+                {/* {checklist && (
     <div className="bg-neutral-900 border-l-4 border-purple-500 p-6 rounded-r-lg mb-8 shadow-lg">
-        <h3 className="text-xl font-bold text-white mb-2">🤖 AI Application Strategy</h3>
+        <h3 className="text-xl font-bold text-white mb-2">🤖 AI Application Strategy</h3> */}
         
         {/* 1. 'prose' and 'prose-invert' automatically style h1, p, ul, li tags 
            2. Removed 'whitespace-pre-line' as the Markdown parser handles spacing 
         */}
-        <div className="prose prose-invert prose-sm text-neutral-300 max-w-none">
+        {/* <div className="prose prose-invert prose-sm text-neutral-300 max-w-none">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {checklist}
             </ReactMarkdown>
         </div>
-    </div>
-)} */}
+    </div> */}
+ 
 
                 {/* Grants List */}
                 <div className="space-y-6">
