@@ -1,71 +1,48 @@
 import React, { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import GrantDetailModal from './GrantDetailModal'; // Ensure this path is correct
+import GrantDetailModal from './GrantDetailModal';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
+// Use a fallback in case API fails or returns empty to keep UI functional
 const DUMMY_GRANTS = [
     {
-        id: 1,
-        title: "Solar Rooftop Subsidy Scheme (Phase II)",
-        status: "High Match",
-        amount: "Up to ₹10 Lakhs",
-        sector: "Manufacturing, Service",
-        deadline: "31st Dec 2025",
-        description: "A central government scheme to promote solar energy adoption by offering direct subsidies on rooftop installations for commercial and industrial users.",
-        eligibility: ["Must be an MSME", "Minimum 10kW system size", "Operational for at least 3 years"],
-        document_url: "grant_document_1.pdf", // Placeholder URL
-    },
-    {
-        id: 2,
-        title: "Energy Efficiency Modernization Fund",
-        status: "Medium Match",
-        amount: "Up to ₹50 Lakhs",
-        sector: "Manufacturing",
-        deadline: "30th Nov 2025",
-        description: "Financial assistance for replacing old machinery with modern, energy-efficient equipment to reduce carbon footprint and operating costs.",
-        eligibility: ["Manufacturing sector only", "Detailed energy audit required", "Project must achieve at least 15% energy savings"],
-        document_url: "grant_document_2.pdf", // Placeholder URL
-    },
-    {
-        id: 3,
-        title: "MSME Green Technology Adoption Grant",
-        status: "High Match",
-        amount: "Up to ₹25 Lakhs",
-        sector: "Service, Trading",
-        deadline: "15th Jan 2026",
-        description: "A grant aimed at service and trading businesses for adopting environmentally friendly technologies like waste management systems or electric delivery vehicles.",
-        eligibility: ["Service or Trading MSMEs", "SME rating of B+ or higher", "Technology must be certified green"],
-        document_url: "grant_document_3.pdf", // Placeholder URL
-    },
-    {
-        id: 4,
-        title: "State Geothermal Project Incentive (Telangana)",
-        status: "Low Match",
-        amount: "Up to ₹5 Crores",
-        sector: "Manufacturing",
-        deadline: "Open",
-        description: "Incentive provided by the state government for establishing industrial units that utilize geothermal energy sources for heating or power generation.",
-        eligibility: ["Project located in Telangana", "Minimum capital investment of ₹25 Crores", "Approval from State Energy Authority"],
-        document_url: "grant_document_4.pdf", // Placeholder URL
-    },
+        id: "dummy_1",
+        title: "Example: Solar Rooftop Subsidy (Demo Data)",
+        match_score: 15,
+        max_value: "Up to ₹10 Lakhs",
+        target_verticals: ["Manufacturing", "Service"],
+        description: "This is a placeholder. Please ensure the backend is running to see real AI matches.",
+        eligibility_criteria: [{ description: "Must be MSME", type: "Must-Have 1" }],
+        filename: "example.pdf"
+    }
 ];
 
 const GrantListPage = () => {
-    // Get the data passed during navigation from the modal
     const location = useLocation();
     const navigate = useNavigate();
-    const { formData } = location.state || { formData: {} };
     
-    // State to manage the modal
+    // Extract real data from navigation state passed from HomePage
+    const { formData, grants, checklist } = location.state || {};
+    
+    // If we have API grants, use them, otherwise use fallback
+    const displayGrants = (grants && grants.length > 0) ? grants : DUMMY_GRANTS;
+
     const [selectedGrant, setSelectedGrant] = useState(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
 
-    // Function to handle the grant click and open the modal
+    // Helper to determine status color based on Match Score from Backend
+    const getMatchStatus = (score) => {
+        if (score >= 15) return { label: "High Match", color: "bg-green-600" };
+        if (score >= 10) return { label: "Medium Match", color: "bg-yellow-600" };
+        return { label: "Low Match", color: "bg-red-600" };
+    };
+
     const handleGrantClick = (grant) => {
         setSelectedGrant(grant);
         setIsModalOpen(true);
     };
     
-    // Function to close the modal
     const handleCloseModal = () => {
         setIsModalOpen(false);
         setSelectedGrant(null);
@@ -88,45 +65,54 @@ const GrantListPage = () => {
                 {/* User's Filter Data Summary */}
                 <div className="bg-gray-800 p-4 rounded-lg shadow-xl mb-10 border border-cyan-700/50">
                     <h2 className="text-lg font-semibold text-white mb-2">Your Profile Filters:</h2>
-                    <div className="grid grid-cols-2 gap-2 text-sm text-neutral-300">
-                        {Object.entries(formData).map(([key, value]) => (
-                            <p key={key} className="flex justify-between items-center bg-gray-700/50 p-2 rounded">
-                                <span className="font-medium text-neutral-400 italic">{key.replace(/_/g, ' ')}:</span>
-                                <span className="font-bold text-green-400">{value}</span>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm text-neutral-300">
+                        {formData ? Object.entries(formData).map(([key, value]) => (
+                            <p key={key} className="flex flex-col bg-gray-700/50 p-2 rounded">
+                                <span className="font-medium text-neutral-400 italic text-xs uppercase">{key.replace(/_/g, ' ')}</span>
+                                <span className="font-bold text-green-400 truncate">{value.toString()}</span>
                             </p>
-                        ))}
-                        {Object.keys(formData).length === 0 && <p className="col-span-2 text-center text-neutral-500">No profile data received.</p>}
+                        )) : <p>No filter data provided.</p>}
                     </div>
                 </div>
+{/*  */}
 
                 {/* Grants List */}
                 <div className="space-y-6">
-                    {DUMMY_GRANTS.map(grant => (
-                        <div 
-                            key={grant.id}
-                            onClick={() => handleGrantClick(grant)}
-                            className="bg-gray-800 p-6 rounded-xl border border-gray-700 transition duration-300 hover:bg-gray-700/70 hover:border-green-500 cursor-pointer shadow-lg flex justify-between items-center"
-                        >
-                            <div>
-                                <h3 className="text-2xl font-bold text-white mb-1">{grant.title}</h3>
-                                <p className="text-neutral-400 text-sm">
-                                    <span className="font-semibold text-green-400">{grant.amount}</span> - Sectors: {grant.sector}
-                                </p>
+                    {displayGrants.map(grant => {
+                        // Safe extraction of fields from backend response
+                        const statusObj = getMatchStatus(grant.match_score || 0);
+                        const sectors = Array.isArray(grant.target_verticals) ? grant.target_verticals.join(", ") : grant.target_verticals;
+                        
+                        return (
+                            <div 
+                                key={grant.id}
+                                onClick={() => handleGrantClick(grant)}
+                                className="bg-gray-800 p-6 rounded-xl border border-gray-700 transition duration-300 hover:bg-gray-700/70 hover:border-green-500 cursor-pointer shadow-lg flex flex-col md:flex-row justify-between md:items-center gap-4"
+                            >
+                                <div className="flex-1">
+                                    <h3 className="text-2xl font-bold text-white mb-2">{grant.title}</h3>
+                                    <p className="text-neutral-400 text-sm mb-2">
+                                        <span className="font-semibold text-green-400 text-lg mr-2">{grant.max_value || "Amount Varies"}</span> 
+                                        <span className="text-neutral-500">|</span> 
+                                        <span className="ml-2 text-cyan-200">Focus: {sectors || "General"}</span>
+                                    </p>
+                                    <p className="text-neutral-500 text-sm line-clamp-2">{grant.description}</p>
+                                </div>
+                                <div className="text-left md:text-right min-w-[150px]">
+                                    <span className={`inline-block px-3 py-1 text-xs font-semibold rounded-full ${statusObj.color} text-white`}>
+                                        {statusObj.label} ({grant.match_score?.toFixed(1) || 0})
+                                    </span>
+                                    <p className="text-xs text-neutral-500 mt-2">
+                                        Source: {grant.filename}
+                                    </p>
+                                </div>
                             </div>
-                            <div className="text-right">
-                                <span className={`inline-block px-3 py-1 text-xs font-semibold rounded-full ${grant.status === 'High Match' ? 'bg-green-600 text-white' : grant.status === 'Medium Match' ? 'bg-yellow-600 text-white' : 'bg-red-600 text-white'}`}>
-                                    {grant.status}
-                                </span>
-                                <p className="text-sm text-neutral-300 mt-1">
-                                    Deadline: <span className="font-medium">{grant.deadline}</span>
-                                </p>
-                            </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             </div>
             
-            {/* The Modal Component */}
+            {/* The Modal Component - Pass specific backend fields */}
             {isModalOpen && selectedGrant && (
                 <GrantDetailModal 
                     grant={selectedGrant} 

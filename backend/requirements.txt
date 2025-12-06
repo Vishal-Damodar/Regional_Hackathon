@@ -21,3 +21,6 @@ pandas-ta
 
 langchain-chroma 
 pypdf
+
+neo4j
+scrapy

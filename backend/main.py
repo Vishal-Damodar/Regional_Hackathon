@@ -44,6 +44,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
+from fastapi.staticfiles import StaticFiles
 
 # LangSmith Imports
 from langsmith import traceable
@@ -214,7 +215,7 @@ class GrantSchema(BaseModel):
 
 class SMEProfile(BaseModel):
     """SME profile with validation"""
-    sme_size: Literal['Micro', 'Small', 'Medium']
+    sme_size: Literal['Micro', 'Small', 'Medium', 'Large']
     udyam_status: bool
     sector_category: str # Relaxed from Literal to allow flexibility
     financial_performance: str 
@@ -864,6 +865,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+static_docs_path = os.path.join(current_dir, SCRAPE_DIR) # SCRAPE_DIR is defined at top of your file
+
+# 2. Create the directory if it doesn't exist yet
+if not os.path.exists(static_docs_path):
+    os.makedirs(static_docs_path)
+
+# 3. Mount it to the "/documents" route
+app.mount("/documents", StaticFiles(directory=static_docs_path), name="documents")
 
 class ChatRequest(BaseModel):
     message: Optional[str] = None

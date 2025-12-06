@@ -2,34 +2,81 @@ import React, { useState } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom"; 
 
+// Ensure these imports match your actual file structure
 import { BackgroundBeamsWithCollision } from "../components/ui/background-beams-with-collision";
 import { TextGenerateEffect } from "../components/ui/text-generate-effect";
 import { CardContainer, CardBody, CardItem } from "../components/ui/3dCard"; 
 
-// --- DUMMY IMAGES ARRAY (SUSTAINABILITY THEME) ---
-// ... (Images array remains the same as previous) ...
-
 // --- GRANT DISCOVERY MODAL COMPONENT ---
 const GrantDiscoveryModal = ({ isOpen, onClose }) => {
-    // ... (Keep the modal logic exactly as it was in the previous code) ...
-    // Note: Use the full modal code from the previous response here.
-    const totalSteps = 6;
+    const totalSteps = 7;
     const [currentStep, setCurrentStep] = useState(1);
     const [formData, setFormData] = useState({});
+    const [isLoading, setIsLoading] = useState(false); 
     const navigate = useNavigate();
 
     if (!isOpen) return null;
 
     const progressPercentage = (currentStep / totalSteps) * 100;
-    const isLastStep = currentStep === totalSteps;
 
     const questions = [
-        { step: 1, label: "What is your SME Size?", key: "SME_Size", type: "radio", options: ["Micro", "Small", "Medium"], info: "Must be an exact match with Grant's SME Size Eligibility." },
-        { step: 2, label: "Do you have Udyam Registration?", key: "Udyam_Status", type: "radio", options: ["Yes", "No"], info: "This status is critical for many government schemes." },
-        { step: 3, label: "What is your primary Sector Category?", key: "Sector_Category", type: "radio", options: ["Manufacturing", "Service", "Trading"], info: "Helps overlap your business with Target Vertical(s)." },
-        { step: 4, label: "Do you satisfy all financial performance criteria?", key: "Financial_Performance", type: "radio", options: ["Yes", "No"], info: "Must satisfy the conditions in Must-Have Criterion 2." },
-        { step: 5, label: "In which State is your primary business located?", key: "Location_State", type: "select", options: ["Telangana", "Assam", "J&K", "Maharashtra", "Tamil Nadu", "Karnataka", "Other"], info: "Must match the Additional Geographic Filter if one is present." },
-        { step: 6, label: "What is the estimated value of your energy transition project (in INR Lakhs)?", key: "Project_Value", type: "number", info: "Must be less than or equal to the Maximum Project Value (INR)." },
+        { 
+            step: 1, 
+            label: "What is your Company Size?", 
+            key: "SME_Size", 
+            type: "radio", 
+            // UPDATED: Added "Large" per request
+            options: ["Micro", "Small", "Medium", "Large"], 
+            info: "Must match your official registration size." 
+        },
+        { 
+            step: 2, 
+            label: "Do you have Udyam Registration?", 
+            key: "Udyam_Status", 
+            type: "radio", 
+            options: ["Yes", "No"], 
+            info: "This status is critical for many government schemes." 
+        },
+        { 
+            step: 3, 
+            label: "What is your primary Sector?", 
+            key: "Sector_Category", 
+            type: "select", 
+            // UPDATED: Expanded options to match Streamlit frontend
+            options: ["Manufacturing", "Service", "Trading", "Agriculture", "Textiles", "Renewable Energy"], 
+            info: "Select the vertical that best describes your business." 
+        },
+        { 
+            step: 4, 
+            label: "What is your Financial Health?", 
+            key: "Financial_Performance", 
+            type: "radio", 
+            // UPDATED: Changed from Yes/No to specific status from Streamlit
+            options: ["Profitable", "Loss Making", "New Startup"], 
+            info: "Helps determine eligibility based on profitability or startup status." 
+        },
+        { 
+            step: 5, 
+            label: "In which State is your primary business located?", 
+            key: "Location_State", 
+            type: "select", 
+            options: ["Telangana", "Assam", "J&K", "Maharashtra", "Tamil Nadu", "Karnataka", "Other"], 
+            info: "Must match the Additional Geographic Filter if one is present." 
+        },
+        { 
+            step: 6, 
+            label: "What is your Project Budget (in INR Lakhs)?", 
+            key: "Project_Value", 
+            type: "number", 
+            info: "Enter the total estimated cost of your project." 
+        },
+        { 
+            step: 7, 
+            label: "Describe your project need in detail", 
+            key: "Project_Need", 
+            type: "textarea", 
+            info: "E.g., 'I need funding to install rooftop solar panels and buy energy efficient machinery.'" 
+        },
     ];
 
     const currentQuestion = questions.find(q => q.step === currentStep);
@@ -39,17 +86,62 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
         setFormData(prev => ({ ...prev, [name]: value }));
     };
 
-    const handleNext = () => {
+    const handleNext = async () => {
         if (!formData[currentQuestion.key]) {
             alert("Please select or enter a value before proceeding.");
             return;
         }
+
         if (currentStep < totalSteps) {
             setCurrentStep(currentStep + 1);
-        } else if (currentStep === totalSteps) {
-            navigate('/grants/results', { state: { formData } });
+        } else {
+            await fetchMatches();
+        }
+    };
+
+    const fetchMatches = async () => {
+        setIsLoading(true);
+        try {
+            // Construct payload strictly matching the Backend 'SMEProfile' model
+            const payload = {
+                sme_profile: {
+                    sme_size: formData.SME_Size,
+                    udyam_status: formData.Udyam_Status === "Yes", 
+                    sector_category: formData.Sector_Category,
+                    financial_performance: formData.Financial_Performance, 
+                    location_state: formData.Location_State,
+                    project_value: parseFloat(formData.Project_Value || 0), 
+                    project_need_description: formData.Project_Need
+                }
+            };
+
+            const response = await fetch("http://127.0.0.1:8000/match-grants", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`API Error: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            
             onClose();
-            setCurrentStep(1);
+            navigate('/grants/results', { 
+                state: { 
+                    grants: data.matches, 
+                    checklist: data.top_match_checklist,
+                    formData: formData 
+                } 
+            });
+
+        } catch (error) {
+            console.error("Failed to fetch grants:", error);
+            alert("Error connecting to AI server. Please ensure backend is running.");
+        } finally {
+            setIsLoading(false);
+            setCurrentStep(1); 
         }
     };
 
@@ -74,16 +166,27 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
             case "select":
                 return (
                     <select name={currentQuestion.key} value={value} onChange={handleInputChange} className="mt-4 w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-cyan-500 focus:ring-cyan-500 transition duration-300">
-                        <option value="" disabled>Select a State</option>
+                        <option value="" disabled>Select an option</option>
                         {currentQuestion.options.map(option => <option key={option} value={option}>{option}</option>)}
                     </select>
                 );
             case "number":
                 return (
                     <>
-                        <input type="number" name={currentQuestion.key} value={value} onChange={handleInputChange} placeholder="Enter Project Value (e.g., 50)" className="mt-4 w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-cyan-500 focus:ring-cyan-500 transition duration-300" />
-                        <p className="text-xs text-neutral-400 mt-2">Enter value in **INR Lakhs** (e.g., 50 for ₹50,00,000).</p>
+                        <input type="number" name={currentQuestion.key} value={value} onChange={handleInputChange} placeholder="Enter value (e.g., 50)" className="mt-4 w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-cyan-500 focus:ring-cyan-500 transition duration-300" />
+                        <p className="text-xs text-neutral-400 mt-2">Enter value in **INR Lakhs** (e.g., 10 for ₹10,00,000).</p>
                     </>
+                );
+            case "textarea":
+                return (
+                    <textarea 
+                        name={currentQuestion.key} 
+                        value={value} 
+                        onChange={handleInputChange} 
+                        placeholder="I need funding to install rooftop solar panels..." 
+                        rows={4}
+                        className="mt-4 w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-cyan-500 focus:ring-cyan-500 transition duration-300" 
+                    />
                 );
             default: return null;
         }
@@ -92,24 +195,35 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
     return (
         <motion.div className="fixed inset-0 z-[100] bg-black bg-opacity-80 backdrop-blur-sm flex items-center justify-center p-4" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <motion.div className="bg-neutral-900 rounded-2xl w-full max-w-lg p-6 shadow-2xl border border-gray-800" initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ duration: 0.3 }}>
-                <div className="flex justify-between items-center pb-4 border-b border-gray-800 mb-4">
-                    <h3 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500">Grant Matching Assistant (Step {currentStep}/{totalSteps})</h3>
-                    <button onClick={onClose} className="text-white hover:text-cyan-400 transition"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
-                </div>
-                <div className="w-full h-2 bg-gray-700 rounded-full mb-6">
-                    <div className="h-2 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-full transition-all duration-500" style={{ width: `${progressPercentage}%` }}></div>
-                </div>
-                <div className="h-48 flex flex-col justify-center">
-                    <motion.div key={currentStep} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3 }}>
-                        <p className="text-lg font-semibold text-white mb-2">{currentQuestion.label}</p>
-                        {renderInput()}
-                        <p className="text-xs text-neutral-500 mt-3 italic">**Guidance:** {currentQuestion.info}</p>
-                    </motion.div>
-                </div>
-                <div className="flex justify-between mt-6 pt-4 border-t border-gray-800">
-                    <button onClick={handleBack} disabled={currentStep === 1} className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${currentStep === 1 ? "bg-gray-700 text-gray-500 cursor-not-allowed" : "bg-purple-600 hover:bg-purple-700 text-white"}`}>&larr; Back</button>
-                    <button onClick={handleNext} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500 hover:bg-cyan-600 text-black transition">{isLastStep ? "Match Grants" : "Next Question →"}</button>
-                </div>
+                
+                {isLoading ? (
+                    <div className="flex flex-col items-center justify-center py-10">
+                        <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-cyan-500 mb-4"></div>
+                        <h3 className="text-xl font-bold text-white">Consulting AI Knowledge Graph...</h3>
+                        <p className="text-neutral-400 text-sm mt-2">Matching your profile against government schemes.</p>
+                    </div>
+                ) : (
+                    <>
+                        <div className="flex justify-between items-center pb-4 border-b border-gray-800 mb-4">
+                            <h3 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500">Grant Matching Assistant (Step {currentStep}/{totalSteps})</h3>
+                            <button onClick={onClose} className="text-white hover:text-cyan-400 transition"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                        </div>
+                        <div className="w-full h-2 bg-gray-700 rounded-full mb-6">
+                            <div className="h-2 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-full transition-all duration-500" style={{ width: `${progressPercentage}%` }}></div>
+                        </div>
+                        <div className="h-48 flex flex-col justify-center">
+                            <motion.div key={currentStep} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3 }}>
+                                <p className="text-lg font-semibold text-white mb-2">{currentQuestion.label}</p>
+                                {renderInput()}
+                                <p className="text-xs text-neutral-500 mt-3 italic">**Guidance:** {currentQuestion.info}</p>
+                            </motion.div>
+                        </div>
+                        <div className="flex justify-between mt-6 pt-4 border-t border-gray-800">
+                            <button onClick={handleBack} disabled={currentStep === 1} className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${currentStep === 1 ? "bg-gray-700 text-gray-500 cursor-not-allowed" : "bg-purple-600 hover:bg-purple-700 text-white"}`}>&larr; Back</button>
+                            <button onClick={handleNext} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500 hover:bg-cyan-600 text-black transition">{currentStep === totalSteps ? "Find Matches" : "Next Question →"}</button>
+                        </div>
+                    </>
+                )}
             </motion.div>
         </motion.div>
     );
@@ -181,7 +295,6 @@ const HomePage = () => {
                                     <span role="img" aria-label="database" className="mr-2">🔄</span> Real-time Data Ingestion
                                 </div>
                             </CardItem>
-                            {/* Buttons removed */}
                         </CardBody>
                     </CardContainer>
 
@@ -199,7 +312,6 @@ const HomePage = () => {
                                     <span role="img" aria-label="thumbs" className="mr-2">👍/👎</span> Adaptive AI Filtering
                                 </div>
                             </CardItem>
-                            {/* Buttons removed */}
                         </CardBody>
                     </CardContainer>
 
@@ -217,7 +329,6 @@ const HomePage = () => {
                                     <span role="img" aria-label="chat" className="mr-2">💬</span> Contextual Doc Chat
                                 </div>
                             </CardItem>
-                            {/* Buttons removed */}
                         </CardBody>
                     </CardContainer>
                 </div>
@@ -275,17 +386,6 @@ const HomePage = () => {
                         <p className="text-neutral-500 text-sm">
                             &copy; {new Date().getFullYear()} GrantTech AI. All rights reserved. Accelerating the green economy.
                         </p>
-                        {/* Social Icons (unchanged) */}
-                        <div className="flex space-x-4 mt-4 md:mt-0">
-                            <a href="#" className="text-neutral-500 hover:text-green-400 transition-colors duration-200">
-                                <span className="sr-only">Twitter</span>
-                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M22.46 6c-.84.37-1.74.62-2.67.75.96-.58 1.7-1.5 2.04-2.63-.9.53-1.89.92-2.93 1.12-2.12-2.27-5.92-.1-5.92 3.1 0 .24 0 .47.07.69C8.02 9.09 4.3 7.02 1.8 3.86.3 6.32 1.04 8.28 2.76 9.39c-.77 0-1.49-.23-2.13-.59v.03c0 2.37 1.69 4.34 3.93 4.79-.41.11-.84.17-1.28.17-.31 0-.6-.03-.89-.08.62 1.95 2.42 3.36 4.56 3.4.15 0 .3 0 .44-.01-1.68 1.32-3.8 2.09-6.07 2.09-.39 0-.77 0-1.15-.05 2.17 1.4 4.75 2.22 7.55 2.22 9.05 0 14.01-7.5 14.01-14.01 0-.21 0-.41-.01-.61.96-.69 1.79-1.54 2.45-2.51z"></path></svg>
-                            </a>
-                            <a href="#" className="text-neutral-500 hover:text-green-400 transition-colors duration-200">
-                                <span className="sr-only">LinkedIn</span>
-                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M19 0h-14c-2.76 0-5 2.24-5 5v14c0 2.76 2.24 5 5 5h14c2.76 0 5-2.24 5-5v-14c0-2.76-2.24-5-5-5zM8 19h-3v-11h3v11zM6.5 6.7c-.96 0-1.7-.75-1.7-1.7s.75-1.7 1.7-1.7 1.7.75 1.7 1.7-.75 1.7-1.7 1.7zM20 19h-3v-5.69c0-1.7-.6-2.85-2.2-2.85-1.2 0-1.9.8-2.2 1.5-.1.2-.1.5-.1.8v6.24h-3s.04-10.97 0-11h3v1.39c.57-.86 1.46-1.92 3.4-1.92 2.45 0 4.3 1.6 4.3 5v6.52z"></path></svg>
-                            </a>
-                        </div>
                     </div>
                 </div>
             </footer>

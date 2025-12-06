@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
+// API Configuration
+const API_BASE_URL = "http://localhost:8000"; 
+
 const GrantDetailModal = ({ grant, onClose }) => {
     // --- Existing State ---
     const [isFeedbackVisible, setIsFeedbackVisible] = useState(false);
@@ -8,8 +11,9 @@ const GrantDetailModal = ({ grant, onClose }) => {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isChatbotOpen, setIsChatbotOpen] = useState(false);
 
-    // --- NEW: Chatbot State ---
+    // --- Chatbot State ---
     const [chatInput, setChatInput] = useState("");
+    const [isChatLoading, setIsChatLoading] = useState(false); // NEW: Loading state for chat
     const [chatHistory, setChatHistory] = useState([
         { role: 'bot', text: `Hello! I can answer questions about the **${grant.title}** grant. What do you need to know?` }
     ]);
@@ -22,7 +26,7 @@ const GrantDetailModal = ({ grant, onClose }) => {
         if (isChatbotOpen && chatEndRef.current) {
             chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
         }
-    }, [chatHistory, isChatbotOpen]);
+    }, [chatHistory, isChatbotOpen, isChatLoading]);
 
     // --- Helpers ---
     const getStatusColor = (status) => {
@@ -52,23 +56,56 @@ const GrantDetailModal = ({ grant, onClose }) => {
         setIsChatbotOpen(prev => !prev); 
     };
 
-    // --- NEW: Chat Message Handler ---
-    const handleSendMessage = () => {
+    // --- NEW: Connected Chat Message Handler ---
+    const handleSendMessage = async () => {
         if (!chatInput.trim()) return;
 
-        // 1. Add User Message
-        const userMsg = { role: 'user', text: chatInput };
-        setChatHistory((prev) => [...prev, userMsg]);
-        const currentInput = chatInput; // Store for API call if needed
-        setChatInput(""); // Clear input
+        // 1. Capture Input & Add User Message
+        const question = chatInput;
+        setChatInput(""); // Clear input immediately
+        setChatHistory((prev) => [...prev, { role: 'user', text: question }]);
+        setIsChatLoading(true); // Start loading
 
-        // 2. Simulate Bot Response (Replace this with real API call later)
-        setTimeout(() => {
+        try {
+            // 2. Call the Backend API
+            const response = await fetch(`${API_BASE_URL}/grant-qa`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    grant_id: grant.id, // Ensure your grant object has the ID from Neo4j
+                    question: question,
+                    thread_id: "user_session_default" // Simple session tracking
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error("Failed to fetch answer");
+            }
+
+            const data = await response.json();
+
+            // 3. Add Bot Response
             setChatHistory((prev) => [
                 ...prev, 
-                { role: 'bot', text: `I received your question: "${currentInput}". I am currently a demo bot, but soon I will be connected to AI!` }
+                { role: 'bot', text: data.answer }
             ]);
-        }, 1000);
+
+            // Optional: Log sources if you want to display them later
+            if (data.sources && data.sources.length > 0) {
+                console.log("Sources:", data.sources);
+            }
+
+        } catch (error) {
+            console.error("Chat Error:", error);
+            setChatHistory((prev) => [
+                ...prev, 
+                { role: 'bot', text: "⚠️ I'm sorry, I encountered an error connecting to the AI. Please try again." }
+            ]);
+        } finally {
+            setIsChatLoading(false); // Stop loading
+        }
     };
 
     const handleKeyDown = (e) => {
@@ -76,6 +113,12 @@ const GrantDetailModal = ({ grant, onClose }) => {
             handleSendMessage();
         }
     };
+
+    // --- DATA HANDLING ---
+    const eligibilityList = grant.eligibility || grant.eligibility_criteria || [];
+    const displayFilename = grant.filename ? decodeURIComponent(grant.filename) : "Unknown File";
+    const documentUrl = grant.document_url || grant.filename;
+    const fullDocumentPath = `${API_BASE_URL}/documents/${documentUrl}`;
 
     return (
         // Modal Background Overlay
@@ -110,33 +153,43 @@ const GrantDetailModal = ({ grant, onClose }) => {
                     {/* LEFT SIDE: Document Preview */}
                     <div className="flex flex-col">
                         <h3 className="text-xl font-bold text-white mb-2 border-b border-gray-700 pb-2">Document Preview</h3>
-                        <div className="flex-grow bg-gray-700 rounded-lg overflow-hidden border border-gray-600">
+                        <div className="flex-grow bg-gray-700 rounded-lg overflow-hidden border border-gray-600 relative">
                             <iframe 
-                                src={`/documents/${grant.document_url}`} 
+                                src={fullDocumentPath} 
                                 title={`${grant.title} Document`}
                                 className="w-full h-full"
                                 style={{ border: 'none' }}
                             >
-                                <p className="p-4 text-center text-red-400">Your browser does not support iframes.</p>
                             </iframe>
+                            <div className="absolute inset-0 flex items-center justify-center -z-10">
+                                <p className="text-gray-400 text-center px-4">
+                                    Loading Document...<br/>
+                                    <span className="text-xs text-gray-500">{displayFilename}</span>
+                                </p>
+                            </div>
                         </div>
                     </div>
                     
                     {/* RIGHT SIDE: Grant Details */}
                     <div className="flex flex-col overflow-y-auto pr-2 custom-scrollbar">
                         <div className="space-y-4">
-                            <p className="text-sm font-semibold text-neutral-400">
-                                <span className={`inline-block px-3 py-1 text-xs font-semibold rounded-full text-white ${getStatusColor(grant.status)}`}>
-                                    {grant.status}
-                                </span>
-                            </p>
+                            <div className="flex justify-between items-center">
+                                <p className="text-sm font-semibold text-neutral-400">
+                                    <span className={`inline-block px-3 py-1 text-xs font-semibold rounded-full text-white ${getStatusColor(grant.status || 'Medium Match')}`}>
+                                        {grant.status || 'Match Found'}
+                                    </span>
+                                </p>
+                                <p className="text-xs text-gray-500 truncate max-w-[200px]" title={displayFilename}>
+                                    📄 {displayFilename}
+                                </p>
+                            </div>
 
                             <div className="bg-gray-800 p-4 rounded-lg">
                                 <h3 className="text-xl font-bold text-green-400 mb-1">Key Information</h3>
                                 <ul className="text-neutral-300 space-y-1">
-                                    <li><strong>Amount:</strong> {grant.amount}</li>
-                                    <li><strong>Sector:</strong> {grant.sector}</li>
-                                    <li><strong>Deadline:</strong> {grant.deadline}</li>
+                                    <li><strong>Amount:</strong> {grant.amount || grant.max_value}</li>
+                                    <li><strong>Sector:</strong> {grant.sector || (Array.isArray(grant.target_verticals) ? grant.target_verticals.join(", ") : grant.target_verticals)}</li>
+                                    <li><strong>Deadline:</strong> {grant.deadline || "Open"}</li>
                                 </ul>
                             </div>
 
@@ -148,9 +201,15 @@ const GrantDetailModal = ({ grant, onClose }) => {
                             <div className="bg-gray-800 p-4 rounded-lg">
                                 <h3 className="text-xl font-bold text-white mb-2">Eligibility Criteria</h3>
                                 <ul className="list-disc list-inside text-neutral-300 text-sm space-y-1">
-                                    {grant.eligibility.map((item, index) => (
-                                        <li key={index}>{item}</li>
-                                    ))}
+                                    {eligibilityList.length > 0 ? (
+                                        eligibilityList.map((item, index) => (
+                                            <li key={index}>
+                                                {typeof item === 'string' ? item : item.description || JSON.stringify(item)}
+                                            </li>
+                                        ))
+                                    ) : (
+                                        <li>No specific eligibility criteria listed.</li>
+                                    )}
                                 </ul>
                             </div>
                         </div>
@@ -211,10 +270,23 @@ const GrantDetailModal = ({ grant, onClose }) => {
                                                 ? 'bg-cyan-700 text-white rounded-tr-none' 
                                                 : 'bg-gray-700 text-gray-200 rounded-tl-none'
                                             }`}>
-                                                {msg.text}
+                                                {/* Simple formatting for bold text if needed */}
+                                                {msg.text.split('**').map((part, i) => 
+                                                    i % 2 === 1 ? <strong key={i}>{part}</strong> : part
+                                                )}
                                             </div>
                                         </div>
                                     ))}
+                                    
+                                    {/* Loading Indicator */}
+                                    {isChatLoading && (
+                                        <div className="flex justify-start">
+                                            <div className="bg-gray-700 text-gray-400 p-2 rounded-lg rounded-tl-none text-xs italic">
+                                                Thinking...
+                                            </div>
+                                        </div>
+                                    )}
+                                    
                                     {/* Invisible div to scroll to */}
                                     <div ref={chatEndRef} />
                                 </div>
@@ -226,12 +298,14 @@ const GrantDetailModal = ({ grant, onClose }) => {
                                         value={chatInput}
                                         onChange={(e) => setChatInput(e.target.value)}
                                         onKeyDown={handleKeyDown}
-                                        placeholder="Ask a question..." 
-                                        className="flex-grow p-2 bg-gray-900 border border-cyan-500/50 rounded text-white text-sm focus:outline-none focus:border-cyan-400 transition-colors"
+                                        disabled={isChatLoading}
+                                        placeholder={isChatLoading ? "Thinking..." : "Ask a question..."}
+                                        className="flex-grow p-2 bg-gray-900 border border-cyan-500/50 rounded text-white text-sm focus:outline-none focus:border-cyan-400 transition-colors disabled:opacity-50"
                                     />
                                     <button 
                                         onClick={handleSendMessage}
-                                        className="bg-cyan-600 hover:bg-cyan-500 text-white px-3 rounded text-lg transition-colors flex items-center justify-center"
+                                        disabled={isChatLoading}
+                                        className="bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-600 text-white px-3 rounded text-lg transition-colors flex items-center justify-center"
                                     >
                                         ➤
                                     </button>
