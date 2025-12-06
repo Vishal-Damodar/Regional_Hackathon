@@ -377,7 +377,7 @@ neo4j_handler = Neo4jHandler(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
 # 4️⃣ EXTRACTION AGENT
 # =========================================================
 
-
+@traceable(run_type="chain", name="Extract & Store Pipeline")
 async def extract_and_store(file_path: str):
     pdf_filename = os.path.basename(file_path) 
     print(f"🕵️ AGENT: Processing {pdf_filename}...")
@@ -524,6 +524,7 @@ def download_pdf(pdf_url, folder_name, filename_hint):
         print(f"[ERROR] Failed to download {pdf_url}: {e}")
         return None
 
+
 def perform_scraping(url: str, output_folder: str):
     """
     Generic scraper that looks for PDF links in the provided URL.
@@ -587,6 +588,7 @@ def perform_scraping(url: str, output_folder: str):
 # =========================================================
 # 7️⃣ MATCHING LOGIC (FIXED AGGREGATION)
 # =========================================================
+@traceable(run_type="tool", name="Neo4j Semantic Search")
 def find_matching_grants(sme: SMEProfile) -> List[Dict]:
     """
     Robust Semantic Search with Fixed Aggregation Logic.
@@ -658,6 +660,7 @@ def find_matching_grants(sme: SMEProfile) -> List[Dict]:
     finally:
         session.close()
 
+@traceable(run_type="chain", name="Generate Checklist")
 async def generate_application_checklist(grant_title: str, sme: SMEProfile):
     prompt = f"""
     Create a practical application checklist for grant: "{grant_title}".
@@ -672,34 +675,8 @@ async def generate_application_checklist(grant_title: str, sme: SMEProfile):
     response = await llm.ainvoke(prompt)
     return response.content
 
-# =========================================================
-# 8️⃣ FASTAPI APP & ENDPOINTS
-# =========================================================
 
 
-
-
-# =========================================================
-# 🆕 SELF-LEARNING LAYER
-# =========================================================
-FEEDBACK_FILE = "agent_rules.json"
-
-def load_rules():
-    if os.path.exists(FEEDBACK_FILE):
-        try:
-            with open(FEEDBACK_FILE, "r") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return []
-    return []
-
-def save_rule(trigger: str, instruction: str):
-    rules = load_rules()
-    if not any(r['trigger'] == trigger and r['instruction'] == instruction for r in rules):
-        rules.append({"trigger": trigger, "instruction": instruction})
-        with open(FEEDBACK_FILE, "w") as f:
-            json.dump(rules, f, indent=2)
-        print(f"🧠 LEARNING: Added new rule for '{trigger}'")
 
 # =========================================================
 # 4️⃣ RAG SETUP & TOOLS
@@ -738,6 +715,7 @@ def search_financial_reports(query: str):
         return f"Error retrieving documents: {str(e)}"
     
 
+@traceable(run_type="chain", name="Prompt Optimization Agent")
 async def optimize_prompt_logic(user_feedback: str, document_snippet: str):
     """
     The 'Prompt Engineer' Agent.
@@ -871,6 +849,10 @@ class MatchRequest(BaseModel):
 # --- NEW: Error Reporting Endpoint ---
 @app.post("/report-error")
 async def report_error_endpoint(report: ErrorReport):
+    return await execute_feedback_loop(report)
+
+@traceable(run_type="chain", name="Feedback Loop")
+async def execute_feedback_loop(report: ErrorReport):
     """
     Trigger the Self-Learning Loop.
     1. Retrieve the document text from Vector Store (using grant_id).
@@ -898,26 +880,19 @@ async def report_error_endpoint(report: ErrorReport):
     return {"status": "success", "message": "System has learned from your feedback. The bad entry was removed and rules updated."}
 
 
+# --- MATCH ENDPOINT ---
 @app.post("/match-grants")
 async def match_grants_endpoint(request: MatchRequest):
-    """
-    Accepts SME Profile, finds matches in Neo4j, and generates a checklist for the top match.
-    """
-    sme = request.sme_profile
-    matches = find_matching_grants(sme)
+    # We wrap the endpoint logic in a traceable function for cleaner hierarchy
+    return await execute_match_pipeline(request.sme_profile)
+
+@traceable(run_type="chain", name="Grant Matching Pipeline")
+async def execute_match_pipeline(sme_profile):
+    matches = find_matching_grants(sme_profile) # Traced Tool Call
+    if not matches: return {"status": "no_match", "matches": []}
     
-    if not matches:
-        return {"status": "no_match", "matches": [], "checklist": None}
-    
-    # Generate checklist for the top match
-    top_grant_title = matches[0]['title']
-    checklist = await generate_application_checklist(top_grant_title, sme)
-    
-    return {
-        "status": "success",
-        "matches": matches,
-        "top_match_checklist": checklist
-    }
+    checklist = await generate_application_checklist(matches[0]['title'], sme_profile) # Traced Chain
+    return {"status": "success", "matches": matches, "top_match_checklist": checklist}
 
 
 @app.post("/crawl")
