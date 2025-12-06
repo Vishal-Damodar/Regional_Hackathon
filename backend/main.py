@@ -693,7 +693,7 @@ def perform_scraping(url: str, output_folder: str):
 @traceable(run_type="tool", name="Neo4j Semantic Search")
 def find_matching_grants(sme: SMEProfile) -> List[Dict]:
     """
-    Robust Semantic Search with Fixed Aggregation Logic.
+    Robust Semantic Search with Fixed Aggregation Logic AND Udyam Filtering.
     """
     session = neo4j_handler.driver.session()
     
@@ -705,19 +705,29 @@ def find_matching_grants(sme: SMEProfile) -> List[Dict]:
     else:
         keywords = " OR ".join([f"{w}~" for w in words])
     
-    # 2. Cypher Query with Step-by-Step Aggregation
+    # 2. Cypher Query
     query = f"""
     CALL db.index.fulltext.queryNodes("grant_keywords", "{keywords}") 
     YIELD node AS g, score
     
-    // --- Step A: Calculate Size Score ---
-    // We use max() to collapse multiple size matches into one number per grant
+    // --- Step A: Check for Udyam Requirement (HARD RULE) ---
+    // We look at linked Criteria nodes to see if they mention 'Udyam' or 'MSME'
+    OPTIONAL MATCH (g)-[:REQUIRES_CRITERION]->(c)
+    WITH g, score, collect(toLower(c.description)) as criteria_texts
+    
+    // Determine if the grant implies Udyam requirement based on text analysis
+    WITH g, score, 
+         ANY(txt IN criteria_texts WHERE txt CONTAINS 'udyam' OR txt CONTAINS 'msme' OR txt CONTAINS 'registration') as requires_udyam
+    
+    // FILTER: If User is NOT registered ($udyam_status = false) AND Grant REQUIRES it, remove the grant.
+    WHERE NOT ($udyam_status = false AND requires_udyam = true)
+
+    // --- Step B: Calculate Size Score ---
     OPTIONAL MATCH (g)-[:ELIGIBLE_FOR_SIZE]->(s)
     WITH g, score, 
          max(CASE WHEN s.name = '{sme.sme_size}' THEN 2.0 ELSE 0.5 END) AS size_score
     
-    // --- Step B: Calculate Sector Score ---
-    // We use max() to find the BEST sector match among all verticals the grant targets
+    // --- Step C: Calculate Sector Score ---
     OPTIONAL MATCH (g)-[:TARGETS_VERTICAL]->(v)
     WITH g, score, size_score,
          max(CASE 
@@ -726,12 +736,11 @@ def find_matching_grants(sme: SMEProfile) -> List[Dict]:
             ELSE 0.5 
          END) AS sector_score
          
-    // --- Step C: Final Calculation ---
-    // Now all variables (score, size_score, sector_score) are unique per 'g'
+    // --- Step D: Final Calculation ---
     WITH g, 
          (score * 5) + coalesce(size_score, 0.5) + coalesce(sector_score, 0.5) AS final_score
     
-    // --- Step D: Return Data ---
+    // --- Step E: Return Data ---
     RETURN {{
         id: g.id,
         title: g.name,
@@ -749,7 +758,8 @@ def find_matching_grants(sme: SMEProfile) -> List[Dict]:
     
     try:
         print(f"🔍 MATCHING: Searching for keywords: {keywords[:50]}...")
-        result = session.run(query)
+        # CRITICAL: Pass udyam_status as a parameter to the query
+        result = session.run(query, udyam_status=sme.udyam_status)
         matches = [record["grant_data"] for record in result]
         
         if not matches:
