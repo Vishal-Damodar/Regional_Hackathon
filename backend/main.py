@@ -61,6 +61,69 @@ NEO4J_PASSWORD = "KushalKuldipSuhas"
 DB_DIR = "./chroma_db"
 SCRAPE_DIR = "scraped_docs"
 CRAWL_OUTPUT_FILE = "crawler_results.json"
+PROMPT_FILE = "extraction_rules.txt"
+
+
+
+DEFAULT_PROMPT = f"""
+    Role
+You are an expert Data Extraction AI specialized in analyzing government documents, grant schemes, and funding opportunity announcements.
+
+Task
+Analyze the provided document text and extract specific structured data into a JSON object.
+
+Important: If the document contains some of the required data but is missing a few fields, add appropriate data by yourself based on context, logical inference, or general knowledge. Do not leave fields empty if they can be reasonably populated.
+
+Critical Instruction: Relevance Check
+Before extracting any data, evaluate if the document is relevant.
+
+The document IS RELEVANT if it describes:
+* A government grant, scheme, or subsidy.
+* A loan program or equity funding opportunity.
+* An incentive program (e.g., PLI - Production Linked Incentive).
+
+The document is IRRELEVANT if it is:
+* A receipt, invoice, or personal letter unrelated to funding.
+* A general news article without specific scheme details.
+* Completely empty or unintelligible.
+
+IF THE DOCUMENT IS IRRELEVANT:
+* Return strictly the string: "abort"
+* Do not return JSON. Do not return any other text.
+
+IF THE DOCUMENT IS RELEVANT:
+1. Extract the fields defined below and return a valid JSON object.
+2. Extraction Schema
+3. name (str): Official name of the grant or scheme.
+4. funding_type (str): One of ['Subsidy', 'Loan', 'Grant', 'Equity']. Note: 'Production Linked Incentives' (PLI) count as 'Subsidy'.
+5. max_value (str | null): Maximum monetary value/outlay (e.g., '19,500 Crore', '50 Lakhs').
+6. max_subsidy (str | null): Specific subsidy amount or percentage per beneficiary (e.g., 'Rs 2.20 per Watt peak').
+7. verticals (List[str]): Target industries (e.g., ['Solar', 'Renewable Energy', 'Textiles']).
+8. tech_focus (List[str]): Specific technologies mentioned (e.g., ['Polysilicon', 'Wafer', 'Cells']).
+9. size_eligibility (List[str]): Target business sizes (e.g., ['Large', 'Micro', 'Small']). Infer 'Large' if the scheme requires GW scale or massive capex.
+10. geo_filter (List[str]): Specific applicable states/regions. Use ['Pan-India'] if applicable to the whole country.
+11. country (List[str]): Countries applicable. Infer 'India' if INR currency or Indian ministries are mentioned.
+12. criterion_1 (str): Primary mandatory eligibility criterion (e.g., capacity requirements).
+13. criterion_2 (str): Secondary mandatory eligibility criterion.
+14. description (str): Description of the grant or scheme.
+
+Output Format
+* Return ONLY valid JSON or the string "abort".
+* No markdown formatting (like ```json).
+    """
+
+
+def get_current_prompt():
+    """Loads the latest self-learned prompt or returns default."""
+    if os.path.exists(PROMPT_FILE):
+        with open(PROMPT_FILE, "r") as f:
+            return f.read()
+    return DEFAULT_PROMPT
+
+def update_prompt(new_prompt_text):
+    """Saves the optimized prompt."""
+    with open(PROMPT_FILE, "w") as f:
+        f.write(new_prompt_text)
 
 
 # =========================================================
@@ -223,6 +286,11 @@ class SMEProfile(BaseModel):
     project_value: float 
     project_need_description: str = Field(description="User's description of what they need money for")
 
+# --- NEW: Feedback Schema ---
+class ErrorReport(BaseModel):
+    grant_id: str
+    user_feedback: str # "This matches wrongly because..."
+
 
 # =========================================================
 # 3️⃣ NEO4J HANDLER (Refactored for Direct JSON Injection)
@@ -333,53 +401,12 @@ async def extract_and_store(file_path: str):
     except Exception as e:
         print(f"❌ AGENT: PDF Load Error for {file_path}: {e}")
         return
+    
+    current_prompt_template = get_current_prompt()
 
     # 2. Define the Prompt
     prompt = f"""
-    Role
-You are an expert Data Extraction AI specialized in analyzing government documents, grant schemes, and funding opportunity announcements.
-
-Task
-Analyze the provided document text and extract specific structured data into a JSON object.
-
-Important: If the document contains some of the required data but is missing a few fields, add appropriate data by yourself based on context, logical inference, or general knowledge. Do not leave fields empty if they can be reasonably populated.
-
-Critical Instruction: Relevance Check
-Before extracting any data, evaluate if the document is relevant.
-
-The document IS RELEVANT if it describes:
-* A government grant, scheme, or subsidy.
-* A loan program or equity funding opportunity.
-* An incentive program (e.g., PLI - Production Linked Incentive).
-
-The document is IRRELEVANT if it is:
-* A receipt, invoice, or personal letter unrelated to funding.
-* A general news article without specific scheme details.
-* Completely empty or unintelligible.
-
-IF THE DOCUMENT IS IRRELEVANT:
-* Return strictly the string: "abort"
-* Do not return JSON. Do not return any other text.
-
-IF THE DOCUMENT IS RELEVANT:
-1. Extract the fields defined below and return a valid JSON object.
-2. Extraction Schema
-3. name (str): Official name of the grant or scheme.
-4. funding_type (str): One of ['Subsidy', 'Loan', 'Grant', 'Equity']. Note: 'Production Linked Incentives' (PLI) count as 'Subsidy'.
-5. max_value (str | null): Maximum monetary value/outlay (e.g., '19,500 Crore', '50 Lakhs').
-6. max_subsidy (str | null): Specific subsidy amount or percentage per beneficiary (e.g., 'Rs 2.20 per Watt peak').
-7. verticals (List[str]): Target industries (e.g., ['Solar', 'Renewable Energy', 'Textiles']).
-8. tech_focus (List[str]): Specific technologies mentioned (e.g., ['Polysilicon', 'Wafer', 'Cells']).
-9. size_eligibility (List[str]): Target business sizes (e.g., ['Large', 'Micro', 'Small']). Infer 'Large' if the scheme requires GW scale or massive capex.
-10. geo_filter (List[str]): Specific applicable states/regions. Use ['Pan-India'] if applicable to the whole country.
-11. country (List[str]): Countries applicable. Infer 'India' if INR currency or Indian ministries are mentioned.
-12. criterion_1 (str): Primary mandatory eligibility criterion (e.g., capacity requirements).
-13. criterion_2 (str): Secondary mandatory eligibility criterion.
-14. description (str): Description of the grant or scheme.
-
-Output Format
-* Return ONLY valid JSON or the string "abort".
-* No markdown formatting (like ```json).
+    {current_prompt_template}
 
 Input Document Text
 {full_text}
@@ -650,19 +677,7 @@ async def generate_application_checklist(grant_title: str, sme: SMEProfile):
 # =========================================================
 
 
-# =========================================================
-# 3️⃣ MOCK DATA LAYER (Local Knowledge Base)
-# =========================================================
-INVENTORY_DB = {
-    "SKU-001": {"name": "Laptop Pro X", "stock": 12, "reorder_level": 20},
-    "SKU-002": {"name": "Wireless Mouse", "stock": 500, "reorder_level": 100},
-}
-POLICY_DOCS = {
-    "parking": "Residents can apply for a street parking permit if they live in Zone A.",
-}
-DRUG_DB = {
-    "aspirin": {"interactions": ["warfarin", "ibuprofen"], "severity": "High"},
-}
+
 
 # =========================================================
 # 🆕 SELF-LEARNING LAYER
@@ -721,91 +736,49 @@ def search_financial_reports(query: str):
         return context
     except Exception as e:
         return f"Error retrieving documents: {str(e)}"
+    
 
-@tool
-def check_inventory(sku_or_product_name: str):
-    """Useful for checking stock levels."""
-    print(f"🛠️ LOCAL TOOL: Checking inventory for {sku_or_product_name}")
-    results = []
-    for sku, data in INVENTORY_DB.items():
-        if sku_or_product_name.lower() in data['name'].lower() or sku_or_product_name.lower() in sku.lower():
-            results.append(data)
-    if not results:
-        return f"No inventory records found for '{sku_or_product_name}'."
-    return json.dumps(results)
+async def optimize_prompt_logic(user_feedback: str, document_snippet: str):
+    """
+    The 'Prompt Engineer' Agent.
+    """
+    current_rules = get_current_prompt()
+    
+    meta_prompt = f"""
+    You are a Senior Prompt Engineer for an AI extraction system.
+    
+    CURRENT SITUATION:
+    The system uses the following prompt rules to decide if a document is a "Grant" or "Irrelevant".
+    
+    [CURRENT RULES START]
+    {current_rules}
+    [CURRENT RULES END]
+    
+    PROBLEM:
+    A user has reported a FALSE POSITIVE. The system extracted data from a document that should have been ignored (aborted), or extracted it incorrectly.
+    
+    USER FEEDBACK: "{user_feedback}"
+    DOCUMENT SNIPPET: "{document_snippet[:500]}..."
+    
+    TASK:
+    Rewrite the [CURRENT RULES] to prevent this mistake in the future. 
+    - You MUST add a specific exclusion criteria to the "Relevance Check" section based on the user's feedback.
+    - Do NOT remove the core functionality of extracting legitimate grants.
+    - Keep the output concise.
+    
+    Return ONLY the new updated prompt text.
+    """
+    
+    try:
+        response = await llm.ainvoke(meta_prompt)
+        new_rules = response.content
+        update_prompt(new_rules)
+        print("🧠 SELF-LEARNING: Extraction rules updated based on user feedback.")
+        return True
+    except Exception as e:
+        print(f"❌ Learning Error: {e}")
+        return False
 
-@tool
-def search_public_policy(query: str):
-    """Useful for answering citizen questions about public services and rules."""
-    query = query.lower()
-    found_info = []
-    for topic, content in POLICY_DOCS.items():
-        if topic in query or query in topic:
-            found_info.append(content)
-    if not found_info:
-        return "No specific policy found."
-    return "\n".join(found_info)
-
-@tool
-def check_drug_interaction(drug_name: str):
-    """Useful for drug interaction queries."""
-    drug_name = drug_name.lower()
-    data = DRUG_DB.get(drug_name)
-    if not data:
-        return "No interactions found."
-    return json.dumps(data)
-
-local_tools = [check_inventory, search_public_policy, check_drug_interaction, search_financial_reports]
-
-app_state = {
-    "graph": None
-}
-
-# =========================================================
-# 5️⃣ LANGGRAPH DEFINITION
-# =========================================================
-
-class State(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-
-def create_agent_graph(tools_list):
-    memory = MemorySaver()
-    llm_with_tools = llm.bind_tools(tools_list)
-
-    def agent_node(state: State):
-        rules = load_rules()
-        if not state["messages"]:
-             user_msg = ""
-        else:
-             user_msg = state["messages"][-1].content
-        
-        if isinstance(user_msg, str):
-            relevant_instructions = [
-                r["instruction"] for r in rules 
-                if r["trigger"].lower() in user_msg.lower()
-            ]
-        else:
-            relevant_instructions = []
-        
-        system_prompt = "You are a helpful assistant."
-        if relevant_instructions:
-            system_prompt += f"\n\n⚠️ IMPORTANT USER RULES:\n- " + "\n- ".join(relevant_instructions)
-            
-        messages = [SystemMessage(content=system_prompt)] + state["messages"]
-        return {"messages": [llm_with_tools.invoke(messages)]}
-
-    workflow = StateGraph(State)
-    workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", ToolNode(tools_list))
-
-    workflow.add_edge(START, "agent")
-    workflow.add_conditional_edges("agent", tools_condition)
-    workflow.add_edge("tools", "agent")
-
-    return workflow.compile(
-        checkpointer=memory, 
-        interrupt_before=["tools"] 
-    )
 
 # =========================================================
 # 6️⃣ LIFESPAN
@@ -837,10 +810,10 @@ async def lifespan(app: FastAPI):
              print(f"⚠️ WARN: Could not load MCP tools (check if MCP server is running): {e}")
              mcp_tools = []
 
-        all_tools = local_tools + mcp_tools
+        all_tools = mcp_tools
         
         print("📊 LIFESPAN: Compiling LangGraph with Memory...")
-        app_state["graph"] = create_agent_graph(all_tools)
+        # app_state["graph"] = create_agent_graph(all_tools)
         print("🚀 LIFESPAN: Graph Ready.")
         
         yield
@@ -893,6 +866,37 @@ class GrantQARequest(BaseModel):
 
 class MatchRequest(BaseModel):
     sme_profile: SMEProfile
+
+
+# --- NEW: Error Reporting Endpoint ---
+@app.post("/report-error")
+async def report_error_endpoint(report: ErrorReport):
+    """
+    Trigger the Self-Learning Loop.
+    1. Retrieve the document text from Vector Store (using grant_id).
+    2. Call the Prompt Engineer to update rules.
+    3. Delete the bad node from Neo4j (Clean up).
+    """
+    print(f"⚠️ FEEDBACK: User flagged grant {report.grant_id}. Reason: {report.user_feedback}")
+    
+    # 1. Get Context
+    vs = get_vectorstore()
+    retriever = vs.as_retriever(search_kwargs={"k": 1, "filter": {"grant_id": report.grant_id}})
+    docs = retriever.invoke("What is this document?")
+    
+    context_snippet = docs[0].page_content if docs else "No text found."
+    
+    # 2. Self-Correction
+    success = await optimize_prompt_logic(report.user_feedback, context_snippet)
+    
+    # 3. Cleanup Bad Data
+    if success:
+        with neo4j_handler.driver.session() as session:
+            session.run("MATCH (g:Grant {id: $id}) DETACH DELETE g", id=report.grant_id)
+            print(f"🗑️ CLEANUP: Deleted bad grant node {report.grant_id}")
+            
+    return {"status": "success", "message": "System has learned from your feedback. The bad entry was removed and rules updated."}
+
 
 @app.post("/match-grants")
 async def match_grants_endpoint(request: MatchRequest):
@@ -1004,49 +1008,6 @@ async def scrape_endpoint(request: ScrapeRequest, background_tasks: BackgroundTa
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/chat")
-async def chat_endpoint(request: ChatRequest):
-    graph = app_state["graph"]
-    if not graph:
-        raise HTTPException(status_code=500, detail="System not initialized")
-
-    config = {"configurable": {"thread_id": request.thread_id}}
-
-    if not request.action:
-        inputs = {"messages": [HumanMessage(content=request.message)]}
-        result = await graph.ainvoke(inputs, config=config)
-        
-        snapshot = graph.get_state(config)
-        if snapshot.next and snapshot.next[0] == "tools":
-            last_msg = snapshot.values["messages"][-1]
-            if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                tool_call = last_msg.tool_calls[0]
-                return {
-                    "response": f"I want to execute: {tool_call['name']} with args {tool_call['args']}. Do you approve?",
-                    "status": "requires_approval",
-                    "tool_call": tool_call
-                }
-        return {"response": result["messages"][-1].content, "status": "completed"}
-
-    elif request.action == "resume":
-        print("▶️ RESUMING Graph execution...")
-        result = await graph.ainvoke(None, config=config)
-        return {"response": result["messages"][-1].content, "status": "completed"}
-
-    elif request.action == "feedback":
-        print("🛑 FEEDBACK RECEIVED. Saving rule...")
-        snapshot = graph.get_state(config)
-        msgs = snapshot.values["messages"]
-        last_human_msg = next((m for m in reversed(msgs) if isinstance(m, HumanMessage)), None)
-        
-        trigger_text = last_human_msg.content if last_human_msg else "general"
-        save_rule(trigger=trigger_text, instruction=request.feedback_text)
-        
-        correction_msg = HumanMessage(content=f"STOP. Don't do that. New Rule: {request.feedback_text}. Try again.")
-        result = await graph.ainvoke({"messages": [correction_msg]}, config=config)
-        
-        return {"response": result["messages"][-1].content, "status": "corrected"}
-    
     
 @app.post("/ingest")
 @traceable(run_type="chain", name="PDF Ingestion Pipeline")
