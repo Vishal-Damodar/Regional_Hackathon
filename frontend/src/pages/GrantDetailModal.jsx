@@ -39,17 +39,50 @@ const GrantDetailModal = ({ grant, onClose }) => {
         setIsFeedbackVisible(prev => !prev); 
     };
 
-    const handleSubmitFeedback = () => {
+    const handleSubmitFeedback = async () => {
+        // 1. Validation
         if (!feedbackReason.trim()) {
             alert("Please provide a reason.");
             return;
         }
+
         setIsSubmitting(true);
-        setTimeout(() => {
-            console.log(`Feedback for Grant ${grant.id}: ${feedbackReason}`);
-            alert(`Thank you for your feedback! Grant: "${grant.title}" marked as potentially irrelevant.`);
+
+        try {
+            // 2. Call the Backend API
+            const response = await fetch(`${API_BASE_URL}/report-error`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    grant_id: grant.id,          // Must match backend ErrorReport schema
+                    user_feedback: feedbackReason // Must match backend ErrorReport schema
+                }),
+            });
+
+            // 3. Handle Errors
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.detail || "Failed to submit feedback");
+            }
+
+            // 4. Success Logic
+            const data = await response.json();
+            console.log("Feedback Response:", data);
+            
+            alert(`Thank you! The system has noted your feedback for "${grant.title}" and will update its rules.`);
+            
+            // Close the modal and optionally reset state
+            setIsFeedbackVisible(false);
             onClose(); 
-        }, 1000);
+
+        } catch (error) {
+            console.error("Error submitting feedback:", error);
+            alert("⚠️ Failed to report this grant. Please ensure the backend is running.");
+        } finally {
+            setIsSubmitting(false);
+        }
     };
     
     const handleChatbotToggle = () => { 
