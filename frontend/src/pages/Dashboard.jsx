@@ -9,27 +9,29 @@ const DashboardPage = () => {
 
     const API_BASE_URL = "http://localhost:8000";
 
-    // --- Backend Interaction (Single Request) ---
-    // This function now handles ONE url at a time to satisfy the backend requirement
-    const triggerScrape = async (singleUrl) => {
+    // --- Backend Interaction ---
+    const triggerScrape = async (urlList) => {
         try {
             const response = await fetch(`${API_BASE_URL}/scrape`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                // Backend expects exactly: { "url": "https://..." }
-                body: JSON.stringify({ url: singleUrl }), 
+                // ✅ FIX: Sending 'urls' (plural) as a List, matching 'class ScrapeRequest(BaseModel): urls: List[str]'
+                body: JSON.stringify({ urls: urlList }), 
             });
 
             if (!response.ok) {
                 const errorData = await response.json();
+                
+                // Error handling to show exact validation message from backend
                 let errorMessage = 'Failed to connect to backend';
                 if (typeof errorData.detail === 'string') {
                     errorMessage = errorData.detail;
                 } else if (typeof errorData.detail === 'object') {
                     errorMessage = JSON.stringify(errorData.detail);
                 }
+                
                 throw new Error(errorMessage);
             }
 
@@ -45,7 +47,7 @@ const DashboardPage = () => {
     const handleManualScrape = async (e) => {
         e.preventDefault();
         
-        // 1. Parse URLs from the textarea
+        // 1. Convert textarea content to Array of strings
         const urlsToScrape = textInput
             .split('\n')
             .map(u => u.trim())
@@ -57,40 +59,22 @@ const DashboardPage = () => {
         }
 
         setLoading(true);
-        setStatus(`Starting batch processing for ${urlsToScrape.length} URL(s)...`);
+        setStatus(`Sending batch request for ${urlsToScrape.length} URL(s)...`);
 
-        let successCount = 0;
-        let failCount = 0;
-        let details = [];
-
-        // 2. Loop through URLs and send requests sequentially
-        for (let i = 0; i < urlsToScrape.length; i++) {
-            const currentUrl = urlsToScrape[i];
-            setStatus(`Processing (${i + 1}/${urlsToScrape.length}): ${currentUrl}...`);
-
-            try {
-                const data = await triggerScrape(currentUrl);
-                
-                if (data.status === 'success') {
-                    successCount++;
-                } else {
-                    failCount++;
-                    details.push(`Warning for ${currentUrl}: ${data.message}`);
-                }
-            } catch (error) {
-                failCount++;
-                details.push(`Error for ${currentUrl}: ${error.message}`);
+        try {
+            // 2. Send the whole list in one request
+            const data = await triggerScrape(urlsToScrape);
+            
+            if (data.status === 'success') {
+                setStatus(`✅ Success: ${data.message}`);
+                setTextInput(''); // Clear input on success
+            } else {
+                setStatus(`⚠️ Warning: ${data.message}`);
             }
-        }
-
-        // 3. Final Summary
-        setLoading(false);
-        if (failCount === 0) {
-            setStatus(`✅ Batch Complete! Successfully processed all ${successCount} URLs.`);
-            setTextInput('');
-        } else {
-            setStatus(`⚠️ Batch Finished. Success: ${successCount}, Failed: ${failCount}. Check console for details.`);
-            console.log("Batch Details:", details);
+        } catch (error) {
+            setStatus(`❌ Error: ${error.message}`);
+        } finally {
+            setLoading(false);
         }
     };
 
