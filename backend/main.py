@@ -835,7 +835,7 @@ class ChatRequest(BaseModel):
 
 # --- NEW: Request Model for Scraping ---
 class ScrapeRequest(BaseModel):
-    url: str
+    urls: List[str]
 
 class GrantQARequest(BaseModel):
     grant_id: str
@@ -863,7 +863,7 @@ async def execute_feedback_loop(report: ErrorReport):
     
     # 1. Get Context
     vs = get_vectorstore()
-    retriever = vs.as_retriever(search_kwargs={"k": 1, "filter": {"grant_id": report.grant_id}})
+    retriever = vs.as_retriever(search_kwargs={"k": 20, "filter": {"grant_id": report.grant_id}})
     docs = retriever.invoke("What is this document?")
     
     context_snippet = docs[0].page_content if docs else "No text found."
@@ -953,33 +953,57 @@ async def crawl_endpoint(request: ScrapeRequest, background_tasks: BackgroundTas
     }
 
 
-# --- THE AUTOMATED ENDPOINT ---
+# --- THE AUTOMATED ENDPOINT (UPDATED) ---
 @app.post("/scrape")
 async def scrape_endpoint(request: ScrapeRequest, background_tasks: BackgroundTasks):
     """
-    1. Scrapes PDFs from the URL.
+    1. Scrapes PDFs from a LIST of URLs.
     2. Automatically schedules them for AI Extraction & Neo4j Ingestion.
     """
+    all_files_queued = []
+    status_messages = []
+
     try:
-        print(f"📥 SCRAPE REQUEST: {request.url}")
-        
-        # 1. Perform Scraping
-        files = perform_scraping(request.url, SCRAPE_DIR)
-        
-        if not files:
-            return {"status": "warning", "message": "No PDFs found to download."}
-        
-        # 2. Queue for Extraction (The Automation Link)
-        for filename in files:
-            full_path = os.path.join(SCRAPE_DIR, filename)
-            # Add to background task queue
-            background_tasks.add_task(extract_and_store, full_path)
+        for url in request.urls:
+            print(f"📥 SCRAPE REQUEST: {url}")
             
+            # 1. Perform Scraping for this specific URL
+            # We wrap this in a try/except so one bad URL doesn't fail the whole batch
+            try:
+                files = perform_scraping(url, SCRAPE_DIR)
+                
+                if not files:
+                    status_messages.append(f"No PDFs found at {url}")
+                    continue
+                
+                # 2. Queue for Extraction
+                for filename in files:
+                    # Avoid re-queuing duplicates if multiple sites link to the same file name
+                    if filename not in all_files_queued:
+                        full_path = os.path.join(SCRAPE_DIR, filename)
+                        background_tasks.add_task(extract_and_store, full_path)
+                        all_files_queued.append(filename)
+                
+                status_messages.append(f"Found {len(files)} PDFs at {url}")
+
+            except Exception as e:
+                print(f"❌ Error scraping {url}: {e}")
+                status_messages.append(f"Error at {url}: {str(e)}")
+
+        if not all_files_queued:
+            return {
+                "status": "warning", 
+                "message": "Process completed but no PDFs were downloaded.",
+                "details": status_messages
+            }
+        
         return {
             "status": "success", 
-            "message": f"Downloaded {len(files)} files. Processing started in background.",
-            "files_queued": files
+            "message": f"Downloaded {len(all_files_queued)} unique files across {len(request.urls)} sites. Processing in background.",
+            "files_queued": all_files_queued,
+            "details": status_messages
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1029,7 +1053,7 @@ async def grant_qa_endpoint(request: GrantQARequest):
         # This ensures we ONLY retrieve chunks belonging to this specific Grant ID
         retriever = vectorstore.as_retriever(
             search_kwargs={
-                "k": 5,
+                "k": 10,
                 "filter": {"grant_id": request.grant_id} 
             }
         )

@@ -8,8 +8,8 @@ import json
 # The URL where your FastAPI backend is running
 BASE_URL = "http://localhost:8000"
 CHAT_URL = f"{BASE_URL}/chat"
-# CHANGED: We now point to the /crawl endpoint for the main pipeline
-CRAWL_URL = f"{BASE_URL}/crawl" 
+# CHANGED: Pointing to the new automated scrape endpoint
+SCRAPE_URL = f"{BASE_URL}/scrape" 
 QA_URL = f"{BASE_URL}/grant-qa"
 MATCH_URL = f"{BASE_URL}/match-grants"
 
@@ -51,36 +51,52 @@ with st.sidebar:
         target_grant_id = st.text_input("Target Grant ID", placeholder="GRANT_xxxx")
         st.divider()
 
-    # --- KNOWLEDGE BUILDER (Crawler Integrated) ---
+    # --- KNOWLEDGE BUILDER (Updated for /scrape) ---
     with st.expander("🧠 Knowledge Base Builder", expanded=True):
-        st.caption("Enter a root URL. The AI will crawl links to find PDFs.")
-        scrape_url_input = st.text_input("Root URL", value="https://ireda.in/cpsu-scheme")
+        st.caption("Enter URL(s). Separate multiple URLs with commas.")
+        scrape_url_input = st.text_area("Target URLs", value="https://ireda.in/cpsu-scheme", height=70)
         
-        if st.button("🚀 Start Crawler & Ingestion"):
-            with st.status("🕷️ Running Web Crawler...", expanded=True) as status:
+        if st.button("🚀 Start Scrape & Ingestion"):
+            with st.status("🕷️ Running Scraper...", expanded=True) as status:
                 try:
-                    st.write("📡 Initializing Spider...")
-                    payload = {"url": scrape_url_input}
+                    st.write("📡 Connecting to Scraper...")
                     
-                    # Increased timeout to 300s because crawling takes time
-                    response = requests.post(CRAWL_URL, json=payload, timeout=300)
+                    # 1. Prepare List of URLs
+                    url_list = [u.strip() for u in scrape_url_input.split(",") if u.strip()]
+                    payload = {"urls": url_list}
+                    
+                    # 2. Call the /scrape endpoint
+                    # Increased timeout to 300s because downloading multiple PDFs takes time
+                    response = requests.post(SCRAPE_URL, json=payload, timeout=300)
                     
                     if response.status_code == 200:
                         data = response.json()
                         status.update(label="Ingestion Pipeline Active!", state="complete", expanded=False)
-                        st.success(f"✅ {data.get('message')}")
                         
-                        # Display Stats
-                        pages = data.get("pages_found", [])
-                        files = data.get("files_queued", [])
-                        
-                        col1, col2 = st.columns(2)
-                        col1.metric("Pages Scanned", len(pages))
-                        col2.metric("PDFs Queued", len(files))
-                        
-                        if files:
-                            st.caption("📄 Files currently being processed by AI:")
-                            st.code("\n".join(files), language="text")
+                        if data.get("status") == "success":
+                            st.success(f"✅ {data.get('message')}")
+                            
+                            # Display Stats
+                            files = data.get("files_queued", [])
+                            details = data.get("details", [])
+                            
+                            col1, col2 = st.columns(2)
+                            col1.metric("URLs Processed", len(url_list))
+                            col2.metric("PDFs Queued", len(files))
+                            
+                            if files:
+                                st.caption("📄 Files currently being processed by AI:")
+                                st.code("\n".join(files), language="text")
+                            
+                            if details:
+                                with st.expander("View Scrape Details"):
+                                    for msg in details:
+                                        st.write(f"- {msg}")
+                        else:
+                            st.warning(f"⚠️ {data.get('message')}")
+                            if data.get("details"):
+                                st.error(data.get("details"))
+
                     else:
                         status.update(label="Failed", state="error")
                         st.error(f"Backend Error: {response.text}")
@@ -118,7 +134,7 @@ if app_mode == "🎯 Smart Grant Matcher":
             financials = st.selectbox("Financial Health", ["Profitable", "Loss Making", "New Startup"])
 
         project_desc = st.text_area("Project Description (What do you need money for?)", 
-                                  value="I need funding to install rooftop solar panels and buy energy efficient machinery.")
+                                    value="I need funding to install rooftop solar panels and buy energy efficient machinery.")
         
         submitted = st.form_submit_button("🔍 Find Matching Grants")
 
