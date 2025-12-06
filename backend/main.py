@@ -7,11 +7,11 @@ import random
 import re
 import uuid
 import time
+import smtplib # NEW
 from urllib.parse import urljoin
 from typing import List, Optional, Annotated, Literal, Dict
 from typing_extensions import TypedDict
 from contextlib import asynccontextmanager
-import json
 import subprocess
 from pydantic import ValidationError
 
@@ -278,6 +278,7 @@ class GrantSchema(BaseModel):
 
 class SMEProfile(BaseModel):
     """SME profile with validation"""
+    email: Optional[str] = Field(default=None, description="Email for notifications") # NEW FIELD
     sme_size: Literal['Micro', 'Small', 'Medium', 'Large']
     udyam_status: bool
     sector_category: str # Relaxed from Literal to allow flexibility
@@ -308,9 +309,58 @@ class Neo4jHandler:
         with self.driver.session() as session:
             try:
                 session.run(query)
-                print("✅ NEO4J: Fulltext Index 'grant_keywords' verified/created.")
+                # Create constraint for SME emails to avoid duplicates
+                session.run("CREATE CONSTRAINT sme_email_unique IF NOT EXISTS FOR (u:SME) REQUIRE u.email IS UNIQUE")
+                print("✅ NEO4J: Indexes and Constraints verified.")
             except Exception as e:
                 print(f"⚠️ NEO4J Index Error: {e}")
+
+    def save_sme_profile(self, sme: dict):
+        """Stores or Updates an SME profile in the Graph for future alerts."""
+        if not sme.get('email'): return 
+
+        query = """
+        MERGE (u:SME {email: $email})
+        SET u.size = $sme_size,
+            u.sector = $sector_category,
+            u.location = $location_state,
+            u.project_need = $project_need_description,
+            u.last_active = datetime()
+        """
+        try:
+            with self.driver.session() as session:
+                session.run(query, 
+                            email=sme['email'], 
+                            sme_size=sme['sme_size'],
+                            sector_category=sme['sector_category'],
+                            location_state=sme['location_state'],
+                            project_need_description=sme['project_need_description'])
+                print(f"👤 NEO4J: Saved Profile for {sme['email']}")
+        except Exception as e:
+            print(f"⚠️ NEO4J SME Save Error: {e}")
+
+    def find_interested_smes(self, grant_data: dict):
+        """
+        REVERSE MATCHING: 
+        Finds SMEs whose profile matches the NEW grant being added.
+        """
+        # We find SMEs where:
+        # 1. The SME sector is contained in the Grant verticals
+        # 2. The SME size is contained in the Grant size eligibility
+        query = """
+        MATCH (u:SME)
+        WHERE 
+            ANY(vertical IN $verticals WHERE vertical CONTAINS u.sector OR u.sector CONTAINS vertical)
+            AND
+            ANY(size IN $sizes WHERE size = u.size)
+        RETURN u.email AS email, u.sector AS sector
+        """
+        
+        with self.driver.session() as session:
+            result = session.run(query, 
+                                 verticals=grant_data.get('verticals', []),
+                                 sizes=grant_data.get('size_eligibility', []))
+            return [record['email'] for record in result if record['email']]
 
     def ingest_grant(self, grant_data: dict):
         """Ingests a single clean grant object into Neo4j."""
@@ -373,9 +423,45 @@ class Neo4jHandler:
 # Initialize Handler
 neo4j_handler = Neo4jHandler(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
 
+
 # =========================================================
 # 4️⃣ EXTRACTION AGENT
 # =========================================================
+
+def send_notification_email(to_email: str, grant_name: str, grant_id: str):
+    """
+    Sends a simple notification email.
+    WARNING: For production, configure real SMTP settings.
+    """
+    sender_email = "kushalbhurve@gmail.com" # REPLACE
+    sender_password = "gska xjfc isda burr" # REPLACE
+    
+    subject = f"New Grant Match: {grant_name}"
+    body = f"""
+    Hello,
+    
+    A new government grant has been added to our system that matches your company profile!
+    
+    Grant Name: {grant_name}
+    Grant ID: {grant_id}
+    
+    Visit the dashboard to check your eligibility.
+    """
+    
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = sender_email
+    msg['To'] = to_email
+
+    try:
+        # UNCOMMENT BELOW TO ACTUALLY SEND
+        # with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        #    server.login(sender_email, sender_password)
+        #    server.send_message(msg)
+        print(f"📧 EMAIL SENT (Simulated) to {to_email} regarding {grant_name}")
+    except Exception as e:
+        print(f"❌ EMAIL ERROR: {e}")
+
 
 @traceable(run_type="chain", name="Extract & Store Pipeline")
 async def extract_and_store(file_path: str):
@@ -450,6 +536,22 @@ Input Document Text
             print(f"🆔 Grant ID: {grant_id}")
             neo4j_handler.ingest_grant(validated_data.model_dump())
             
+            # --- NEW: TRIGGER NOTIFICATION ---
+            try:
+                print(f"🔔 NOTIFY: Checking for interested SMEs for {grant_id}...")
+                grant_dict = validated_data.model_dump()
+                interested_emails = neo4j_handler.find_interested_smes(grant_dict)
+                
+                if interested_emails:
+                    print(f"🔔 NOTIFY: Found {len(interested_emails)} potential matches.")
+                    for email in interested_emails:
+                        send_notification_email(email, validated_data.name, grant_id)
+                else:
+                    print("🔔 NOTIFY: No matching subscribers found.")
+            except Exception as e:
+                print(f"⚠️ NOTIFICATION LOGIC FAILED: {e}")
+            # ---------------------------------
+
             print(f"📚 VECTOR: Chunking and embedding text for {grant_id}...")
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             
@@ -803,7 +905,6 @@ async def lifespan(app: FastAPI):
     print("🛑 LIFESPAN: Application shutdown.")
 
 
-
 # =========================================================
 # 7️⃣ FASTAPI APP
 # =========================================================
@@ -887,11 +988,16 @@ async def match_grants_endpoint(request: MatchRequest):
     return await execute_match_pipeline(request.sme_profile)
 
 @traceable(run_type="chain", name="Grant Matching Pipeline")
-async def execute_match_pipeline(sme_profile):
-    matches = find_matching_grants(sme_profile) # Traced Tool Call
+async def execute_match_pipeline(sme_profile: SMEProfile):
+    # --- NEW: SAVE PROFILE ---
+    if sme_profile.email:
+        neo4j_handler.save_sme_profile(sme_profile.model_dump())
+    # -------------------------
+
+    matches = find_matching_grants(sme_profile) 
     if not matches: return {"status": "no_match", "matches": []}
     
-    checklist = await generate_application_checklist(matches[0]['title'], sme_profile) # Traced Chain
+    checklist = await generate_application_checklist(matches[0]['title'], sme_profile) 
     return {"status": "success", "matches": matches, "top_match_checklist": checklist}
 
 
@@ -929,7 +1035,6 @@ async def crawl_endpoint(request: ScrapeRequest, background_tasks: BackgroundTas
     # We will also pass the direct PDF links if available to save time.
     
     unique_sources = list(set([item['source_url'] for item in crawled_data if 'source_url' in item]))
-    
     print(f"✅ Found {len(unique_sources)} unique pages with PDFs.")
     
     files_queued = []
