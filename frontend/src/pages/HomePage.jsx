@@ -9,7 +9,7 @@ import { CardContainer, CardBody, CardItem } from "../components/ui/3dCard";
 
 // --- GRANT DISCOVERY MODAL COMPONENT ---
 const GrantDiscoveryModal = ({ isOpen, onClose }) => {
-    const totalSteps = 7;
+    const totalSteps = 8; // UPDATED to 8 steps
     const [currentStep, setCurrentStep] = useState(1);
     const [formData, setFormData] = useState({});
     const [isLoading, setIsLoading] = useState(false); 
@@ -25,7 +25,6 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
             label: "What is your Company Size?", 
             key: "SME_Size", 
             type: "radio", 
-            // UPDATED: Added "Large" per request
             options: ["Micro", "Small", "Medium", "Large"], 
             info: "Must match your official registration size." 
         },
@@ -42,7 +41,6 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
             label: "What is your primary Sector?", 
             key: "Sector_Category", 
             type: "select", 
-            // UPDATED: Expanded options to match Streamlit frontend
             options: ["Manufacturing", "Service", "Trading", "Agriculture", "Textiles", "Renewable Energy"], 
             info: "Select the vertical that best describes your business." 
         },
@@ -51,7 +49,6 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
             label: "What is your Financial Health?", 
             key: "Financial_Performance", 
             type: "radio", 
-            // UPDATED: Changed from Yes/No to specific status from Streamlit
             options: ["Profitable", "Loss Making", "New Startup"], 
             info: "Helps determine eligibility based on profitability or startup status." 
         },
@@ -77,6 +74,14 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
             type: "textarea", 
             info: "E.g., 'I need funding to install rooftop solar panels and buy energy efficient machinery.'" 
         },
+        // --- NEW STEP: Email Capture ---
+        { 
+            step: 8, 
+            label: "Where should we send grant alerts?", 
+            key: "Email_ID", 
+            type: "email", 
+            info: "We will notify you when new grants matching your profile are added." 
+        }
     ];
 
     const currentQuestion = questions.find(q => q.step === currentStep);
@@ -102,7 +107,6 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
     const fetchMatches = async () => {
         setIsLoading(true);
         try {
-            // Construct payload strictly matching the Backend 'SMEProfile' model
             const payload = {
                 sme_profile: {
                     sme_size: formData.SME_Size,
@@ -111,7 +115,8 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
                     financial_performance: formData.Financial_Performance, 
                     location_state: formData.Location_State,
                     project_value: parseFloat(formData.Project_Value || 0), 
-                    project_need_description: formData.Project_Need
+                    project_need_description: formData.Project_Need,
+                    email: formData.Email_ID // --- NEW FIELD ---
                 }
             };
 
@@ -185,6 +190,18 @@ const GrantDiscoveryModal = ({ isOpen, onClose }) => {
                         onChange={handleInputChange} 
                         placeholder="I need funding to install rooftop solar panels..." 
                         rows={4}
+                        className="mt-4 w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-cyan-500 focus:ring-cyan-500 transition duration-300" 
+                    />
+                );
+            // --- NEW CASE: EMAIL INPUT ---
+            case "email":
+                return (
+                    <input 
+                        type="email" 
+                        name={currentQuestion.key} 
+                        value={value} 
+                        onChange={handleInputChange} 
+                        placeholder="name@company.com" 
                         className="mt-4 w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:border-cyan-500 focus:ring-cyan-500 transition duration-300" 
                     />
                 );
@@ -372,7 +389,7 @@ const HomePage = () => {
                             </ul>
                         </div>
 
-                        {/* Column 4: Contact Info (Optional in small screens) */}
+                        {/* Column 4: Contact Info */}
                         <div className="col-span-2 md:col-span-1">
                             <h4 className="text-lg font-semibold mb-4 text-white">Get in Touch</h4>
                             <p className="text-neutral-400 text-sm">101 Eco-Friendly Blvd,</p>
